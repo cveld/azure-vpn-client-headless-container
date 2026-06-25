@@ -1,0 +1,29 @@
+# === Secrets / niet-redistribueerbaar — echte locatie staat in CLAUDE.local.md ===
+# (msalcache/refresh-tokens, VPN-profiel met <serversecret>/tls-crypt key, persoonlijke notities)
+token-cache/
+vpn/
+notes.ps1
+
+# Proprietary Microsoft client-libs (libLinuxCore.so/libXplat) — niet redistribueerbaar.
+# Gevuld door fetch-libs.sh; lokaal houden.
+re/extract/
+src/extract/
+src/libs/
+
+# RE-output / temp (decompiles, backtraces, leeskopieën)
+re/*.txt
+re/headless/out_*.txt
+re/headless/bt.txt
+
+# Persoonlijke machine-configuratie (paden, nooit committen)
+.env
+
+# Persoonlijke Claude-config (symlink naar OneDrive; bevat lokale permissies)
+.claude
+.claude/
+
+# Per-project lokale instructies (wijst naar klant-specifieke OneDrive-map, nooit committen)
+CLAUDE.local.md
+
+# Download-cache: ~473M herdownloadbare apt/appx packages (zie download-azurevpnclient.sh)
+downloaded/
