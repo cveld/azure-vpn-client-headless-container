@@ -27,3 +27,8 @@ CLAUDE.local.md
 
 # Download-cache: ~473M herdownloadbare apt/appx packages (zie download-azurevpnclient.sh)
 downloaded/
+
+# queried list of virtual machines are cached:
+.cache
+# tenant names, preferences are stored in this file:
+rdp-connect-settings.json
