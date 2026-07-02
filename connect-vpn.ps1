@@ -1,13 +1,20 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-  Interactive Azure VPN profile selector.
+  Azure VPN profile selector — interactive or non-interactive.
   Reads installed profiles from the Azure VPN Client, lets you pick one,
   extracts the profile XML and starts the azurevpntunnel container.
+.PARAMETER Profile
+  Profile name (or substring). When set, skips the interactive menu.
 .EXAMPLE
   .\connect-vpn.ps1
+  .\connect-vpn.ps1 -Profile "IGH - Insurances"
 #>
+param(
+    [string]$VpnProfile = ''
+)
 $ErrorActionPreference = 'Stop'
+$Interactive = [string]::IsNullOrEmpty($VpnProfile)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 $PBK   = "$env:LOCALAPPDATA\Packages\Microsoft.AzureVpn_8wekyb3d8bbwe\LocalState\rasphone.pbk"
@@ -22,6 +29,9 @@ $ROOT   = "/mnt/$_drive$_path"
 # ── .env ─────────────────────────────────────────────────────────────────────
 $_envFile = Join-Path $PSScriptRoot '.env'
 if (-not (Test-Path $_envFile)) {
+    if (-not $Interactive) {
+        Write-Host '  x .env not found — run connect-vpn.ps1 interactively once to set up.' -ForegroundColor Red; exit 1
+    }
     Write-Host ''
     Write-Host '  No .env file found — first-time setup' -ForegroundColor Cyan
     Write-Host ''
@@ -71,6 +81,9 @@ if (-not (Test-Path (Join-Path $PSScriptRoot 'src\libs\libLinuxCore.so'))) {
         Write-Host '  Set LIBS_SOURCE in .env to copy from an existing local directory instead.' -ForegroundColor DarkGray
     }
     Write-Host ''
+    if (-not $Interactive) {
+        Write-Host '  x src/libs/ missing — run fetch-libs.ps1 first.' -ForegroundColor Red; exit 1
+    }
     $c = Read-Host '  Run fetch-libs.ps1 now? (Y/n)'
     if ($c -notmatch '^[nN]') {
         & (Join-Path $PSScriptRoot 'fetch-libs.ps1')
@@ -213,7 +226,7 @@ function Write-Step ([string]$Msg, [string]$Color = 'Gray') {
 }
 
 # ── Build profile list ────────────────────────────────────────────────────────
-Clear-Host
+if ($Interactive) { Clear-Host }
 Write-Step 'Reading profiles from Azure VPN Client...' DarkGray
 
 if (-not (Test-Path $PBK)) {
@@ -245,12 +258,24 @@ if ($profiles.Count -eq 0) {
 }
 
 # ── Select ────────────────────────────────────────────────────────────────────
-$idx = Show-Menu $profiles
-if ($idx -lt 0) { Clear-Host; exit 0 }
+if ($Interactive) {
+    $idx = Show-Menu $profiles
+    if ($idx -lt 0) { Clear-Host; exit 0 }
+} else {
+    $idx = -1
+    for ($i = 0; $i -lt $profiles.Count; $i++) {
+        if ($profiles[$i].Name -like "*$VpnProfile*") { $idx = $i; break }
+    }
+    if ($idx -lt 0) {
+        Write-Step "x No profile matching '$VpnProfile'" Red
+        Write-Step "  Available: $(($profiles | ForEach-Object { $_.Name }) -join ', ')" Gray
+        exit 1
+    }
+}
 
 $p    = $profiles[$idx]
 $CNTR = $p.ContainerName
-Clear-Host
+if ($Interactive) { Clear-Host }
 Write-Host ''
 Write-Host "  ┌─ $($p.Name)" -ForegroundColor Cyan
 Write-Host "  │  Container: $CNTR" -ForegroundColor Gray
@@ -263,6 +288,7 @@ Write-Host ''
 
 if ($p.Auth -ne 'Entra') {
     Write-Step '  Cert profile — shim only supports Entra authentication.' Yellow
+    if (-not $Interactive) { Write-Step 'x Cannot connect to Cert profile non-interactively.' Red; exit 1 }
     $c = Read-Host '   Connect anyway? (y/N)'
     if ($c -notmatch '^[yY]') { exit 0 }
     Write-Host ''
@@ -283,6 +309,22 @@ if ([string]::IsNullOrEmpty($p.Tenant) -or [string]::IsNullOrEmpty($p.Audience))
     Write-Step 'x Tenant or audience missing in profile XML — cannot acquire token.' Red; exit 1
 }
 
+# ── Token: WAM first (silent/popup), device code as fallback ─────────────────
+if ($p.Auth -eq 'Entra') {
+    $wamScript = Join-Path $PSScriptRoot 'wam-auth.ps1'
+    if (Test-Path $wamScript) {
+        Write-Step 'Trying WAM authentication...' Cyan
+        try {
+            & $wamScript -ProfileName $p.Name -TenantId $p.Tenant -CachePath $cache
+        } catch {
+            Write-Step "~ WAM error: $($_.Exception.Message)" Yellow
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Step '~ WAM failed — device code flow will be used if needed' Yellow
+        }
+    }
+}
+
 # msal available in WSL?
 wsl -d Ubuntu-20.04 -- python3 -c "import msal" 2>$null | Out-Null
 if ($LASTEXITCODE -ne 0) {
@@ -290,8 +332,8 @@ if ($LASTEXITCODE -ne 0) {
     wsl -d Ubuntu-20.04 -- pip3 install --quiet msal
 }
 
-# Altijd device_code.py draaien: valideert cache-formaat, refresht verlopen tokens,
-# converteert Python MSAL → 2-niveau base64, start device code flow als er geen cache is.
+# device_code.py: validates format and exits 0 if WAM wrote a valid token;
+# otherwise refreshes via refresh token or runs the device code flow.
 Write-Step 'Validating/refreshing token cache...' Cyan
 wsl -d Ubuntu-20.04 -- python3 "$ROOT/src/device_code.py" $p.Tenant $p.Audience $cacheWsl
 if ($LASTEXITCODE -ne 0) { Write-Step 'x Token flow failed.' Red; exit 1 }
@@ -372,7 +414,9 @@ if (-not $up) {
 
 Write-Step "✓ Tunnel UP (${elapsed}s)" Green
 Write-Host ''
-Write-Step 'Shell in container. VPN stays active after exit.' Cyan
 Write-Step "Stop: wsl -d Ubuntu-20.04 -- docker stop $CNTR" DarkGray
 Write-Host ''
-wsl -d Ubuntu-20.04 -- docker exec -it $CNTR bash
+if ($Interactive) {
+    Write-Step 'Shell in container. VPN stays active after exit.' Cyan
+    wsl -d Ubuntu-20.04 -- docker exec -it $CNTR bash
+}
