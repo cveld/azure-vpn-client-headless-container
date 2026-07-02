@@ -82,18 +82,33 @@ Each session adds `127.0.0.1 <device>  # rdp-vpn-ps-<device>` before launching m
 `Switch-AzTenant` (used when `-TenantTool az-context`):
 
 1. Calls `az-context.ps1 -tenant <name>` — sets `$env:AZURE_CONFIG_DIR`, no native command.
-2. Calls `az account show` to verify the tenant matches.
-3. Mismatch → "token expired" → calls `az-context.ps1 -tenant <name> -login` → re-verifies.
+2. **Fast path**: reads `azureProfile.json` from the config dir directly
+   (`Get-AzProfileTenantId`) and compares the default subscription's `tenantId`.
+   Match → done, zero az calls. This is semantically identical to
+   `az account show --query tenantId` — the CLI only reads that same file — but skips
+   the ~5s Python startup az pays per invocation (previously 2× per switch ≈ 9s).
+3. Mismatch/missing → calls `az-context.ps1 -tenant <name> -login`, then verifies once
+   via the real `az account show` (slow path only after a login or subscription switch).
+
+The native (non az-context) path uses the same fast check before falling back to
+`az account list` / `az account set` / `az login`.
+
+Note: neither `az account show` nor the file read detects *expired* tokens — MSAL
+refreshes tokens at use time. The check only detects a missing/mismatching cached session.
 
 **Gotcha**: do NOT check `$LASTEXITCODE` after a pure PS script call. `$LASTEXITCODE` is only
 updated by native executables. A PS script that does no native calls leaves `$LASTEXITCODE`
-stale — and `$null -ne 0` is `$true` in PowerShell. Use `az account show` as the real gate.
+stale — and `$null -ne 0` is `$true` in PowerShell. Use the profile check as the real gate.
 
 ## Resource Graph VM query
 
 Replaces `az vm list` (subscription-scoped) with `az graph query` (tenant-wide).
 
 Requires the `resource-graph` extension — auto-installed with `--yes` on first run.
+The check itself (`az extension show`) costs ~2s per az invocation, so it runs once per
+tenant and is remembered via a marker file `.cache/rg-ext-<tenantId>.ok`. When a live
+graph query fails, the marker is treated as stale: the extension is re-checked/installed
+and the query retried once (covers a fresh `AZURE_CONFIG_DIR` without the extension).
 
 **KQL multiline gotcha**: `az graph query -q` ignores newlines in the query string — only the first
 line (`Resources`) is used as the query, returning ALL resource types unfiltered.
@@ -174,11 +189,14 @@ Located next to `rdp-connect.ps1` in the project root. Gitignored — not commit
 
 ### Auto-population of rdpUsername
 
-After each successful `Switch-AzTenant`, the script runs:
+After the first successful `Switch-AzTenant` for a profile, the script runs:
 ```powershell
 az ad signed-in-user show --query userPrincipalName -o tsv
 ```
-and saves the result as `rdpUsername` for that profile. Runs once per profile (skips if already set and unchanged). This ensures the correct per-tenant B2B guest UPN is used in the RDP file — important because each tenant can assign a different guest UPN to the same home-tenant user.
+and saves the result as `rdpUsername` for that profile. Once `rdpUsername` is set in the
+settings, the az lookup is skipped entirely (it costs ~5s per run) and a
+`+ RDP username (from settings): ...` line is logged instead. Clear the field in
+`rdp-connect-settings.json` to force a re-query. This ensures the correct per-tenant B2B guest UPN is used in the RDP file — important because each tenant can assign a different guest UPN to the same home-tenant user.
 
 **Why this matters**: With `enablerdsaadauth:i:1`, mstsc uses WAM to obtain an Entra access token. WAM uses the `username:s:` hint to select the right account. If the hint is the user's home-tenant UPN but the VM is in a different tenant and has no B2B relationship with that account, WAM returns an invalid token → `SEC_E_INVALID_TOKEN`.
 

@@ -634,35 +634,54 @@ function Show-ProfileMenu ([hashtable[]]$Profiles, [string]$CurrentTool, [bool]$
 }
 
 # ── Tenant switching ──────────────────────────────────────────────────────────
+function Get-AzProfileTenantId {
+    # Fast equivalent of 'az account show --query tenantId': the CLI only reads
+    # azureProfile.json from the config dir, but pays ~5s Python startup per call.
+    # Reading the file directly is semantically identical and near-instant.
+    $configDir = if ([string]::IsNullOrWhiteSpace($env:AZURE_CONFIG_DIR)) {
+        Join-Path $HOME '.azure'
+    } else { $env:AZURE_CONFIG_DIR }
+    $profilePath = Join-Path $configDir 'azureProfile.json'
+    if (-not (Test-Path $profilePath)) { return '' }
+    try {
+        $p = Get-Content $profilePath -Raw | ConvertFrom-Json
+        $default = @($p.subscriptions | Where-Object { $_.isDefault }) | Select-Object -First 1
+        if ($default) { return [string]$default.tenantId }
+    } catch {}
+    return ''
+}
+
 function Switch-AzTenant ([string]$AzTenantName, [string]$ExpectedTenantId) {
     if ($Tenant -eq 'current') { return }
 
     if ($TenantTool -eq 'az-context') {
         Write-Step "Switching az context → $AzTenantName  (via az-context)..." Cyan
         # az-context.ps1 without -Login only sets AZURE_CONFIG_DIR (no native commands).
-        # $LASTEXITCODE is unreliable here ($null -ne 0 is $true in PowerShell).
         & 'c:\prg\az-context.ps1' -tenant $AzTenantName
-        $check = (az account show --query tenantId -o tsv 2>$null)
-        if ($check -ne $ExpectedTenantId) {
-            Write-Step "~ Token expired or no cached session — running az-context -login for $AzTenantName..." Yellow
-            & 'c:\prg\az-context.ps1' -tenant $AzTenantName -login
+        if ((Get-AzProfileTenantId) -eq $ExpectedTenantId) {
+            Write-Step "+ Tenant OK: $ExpectedTenantId" DarkGreen
+            return
         }
+        Write-Step "~ No cached session for tenant — running az-context -login for $AzTenantName..." Yellow
+        & 'c:\prg\az-context.ps1' -tenant $AzTenantName -login
     } else {
-        $cur = (az account show --query tenantId -o tsv 2>$null)
-        if ($cur -ne $ExpectedTenantId) {
-            Write-Step "Switching az tenant → $ExpectedTenantId..." Cyan
-            $subId = (az account list --query "[?tenantId=='$ExpectedTenantId'] | [0].id" -o tsv 2>$null)
-            if (-not [string]::IsNullOrWhiteSpace($subId)) {
-                az account set --subscription $subId 2>$null | Out-Null
-            }
-            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($subId)) {
-                Write-Step "No cached subscription for tenant, running az login..." Yellow
-                az login --tenant $ExpectedTenantId --allow-no-subscriptions | Out-Null
-                if ($LASTEXITCODE -ne 0) { Write-Step 'x az login failed.' Red; exit 1 }
-            }
+        if ((Get-AzProfileTenantId) -eq $ExpectedTenantId) {
+            Write-Step "+ Tenant OK: $ExpectedTenantId" DarkGreen
+            return
+        }
+        Write-Step "Switching az tenant → $ExpectedTenantId..." Cyan
+        $subId = (az account list --query "[?tenantId=='$ExpectedTenantId'] | [0].id" -o tsv 2>$null)
+        if (-not [string]::IsNullOrWhiteSpace($subId)) {
+            az account set --subscription $subId 2>$null | Out-Null
+        }
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($subId)) {
+            Write-Step "No cached subscription for tenant, running az login..." Yellow
+            az login --tenant $ExpectedTenantId --allow-no-subscriptions | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Step 'x az login failed.' Red; exit 1 }
         }
     }
 
+    # Slow path only — after a login or subscription switch, verify via the real CLI.
     $actual = (az account show --query tenantId -o tsv 2>$null)
     if ($actual -ne $ExpectedTenantId) {
         Write-Step "x Tenant mismatch after switch: got '$actual', expected '$ExpectedTenantId'" Red; exit 1
@@ -680,6 +699,18 @@ function Start-VpnContainer ([hashtable]$VpnProfile) {
     Write-Step "Starting VPN for '$($VpnProfile.Name)'..." Yellow
     & (Join-Path $PSScriptRoot 'connect-vpn.ps1') -VpnProfile $VpnProfile.Name
     if ($LASTEXITCODE -ne 0) { Write-Step 'x VPN connect failed.' Red; exit 1 }
+}
+
+# ── Resource Graph extension check ────────────────────────────────────────────
+function Confirm-ResourceGraphExtension {
+    # Ensure the extension is present before querying (avoids an interactive install prompt).
+    az extension show --name resource-graph -o none 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Step 'Installing resource-graph extension...' DarkGray
+        az extension add --name resource-graph --yes 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { return $false }
+    }
+    return $true
 }
 
 # ── RDP file signing ──────────────────────────────────────────────────────────
@@ -823,12 +854,17 @@ else {
     }
 
     # Query and cache tenant-specific RDP username ─────────────────────────────
+    # Skipped when already cached in settings — 'az ad signed-in-user show' costs ~5s.
     if ($Tenant -ne 'current' -and -not [string]::IsNullOrWhiteSpace($targetProfile.AzTenant)) {
-        $tenantUpn = (az ad signed-in-user show --query userPrincipalName -o tsv 2>$null)?.Trim()
-        if (-not [string]::IsNullOrWhiteSpace($tenantUpn) -and $tenantUpn -ne $targetProfile.RdpUsername) {
-            $targetProfile.RdpUsername = $tenantUpn
-            Save-ProfileSettings $vpnProfiles
-            Write-Step "+ Cached RDP username for '$($targetProfile.Name)': $tenantUpn" DarkGreen
+        if (-not [string]::IsNullOrWhiteSpace($targetProfile.RdpUsername)) {
+            Write-Step "+ RDP username (from settings): $($targetProfile.RdpUsername) — skipping az ad lookup" DarkGray
+        } else {
+            $tenantUpn = (az ad signed-in-user show --query userPrincipalName -o tsv 2>$null)?.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($tenantUpn)) {
+                $targetProfile.RdpUsername = $tenantUpn
+                Save-ProfileSettings $vpnProfiles
+                Write-Step "+ Cached RDP username for '$($targetProfile.Name)': $tenantUpn" DarkGreen
+            }
         }
     }
 
@@ -852,12 +888,17 @@ else {
         Write-Step "VM: $($targetVm.name)  ($($targetVm.computerName) / $($targetVm.ip))" DarkGreen
     } else {
         # Resource Graph: cross-subscription VM discovery.
-        # Ensure extension is present before querying (avoids an interactive install prompt).
-        az extension show --name resource-graph -o none 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Step 'Installing resource-graph extension...' DarkGray
-            az extension add --name resource-graph --yes 2>$null | Out-Null
-            if ($LASTEXITCODE -ne 0) { Write-Step 'x resource-graph extension install failed.' Red; exit 1 }
+        # The extension check costs ~2s per az call, so it runs once per tenant and is
+        # remembered via a marker file. A failed graph query re-checks and retries,
+        # covering stale markers (e.g. a fresh AZURE_CONFIG_DIR without the extension).
+        $rgMarker = Join-Path $PSScriptRoot ".cache\rg-ext-$($targetProfile.TenantId -replace '[^a-zA-Z0-9-]','_').ok"
+        if (-not (Test-Path $rgMarker)) {
+            if (-not (Confirm-ResourceGraphExtension)) {
+                Write-Step 'x resource-graph extension install failed.' Red; exit 1
+            }
+            $_cacheDir = Split-Path $rgMarker
+            if (-not (Test-Path $_cacheDir)) { New-Item $_cacheDir -ItemType Directory | Out-Null }
+            Set-Content $rgMarker ([datetime]::UtcNow.ToString('o')) -Encoding UTF8
         }
 
         $kqlFilters = @("type =~ 'microsoft.compute/virtualmachines'")
@@ -914,7 +955,15 @@ az @a 2>`$null | Set-Content '$tmpOut' -Encoding UTF8
             Write-Step 'Querying VMs...' DarkGray
             $vmJson = az @graphArgs 2>$null
             if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($vmJson)) {
-                Write-Step 'x az graph query failed.' Red; exit 1
+                # Marker may be stale — re-check the extension and retry once.
+                Write-Step '~ Graph query failed — re-checking resource-graph extension...' Yellow
+                if (Confirm-ResourceGraphExtension) {
+                    Set-Content $rgMarker ([datetime]::UtcNow.ToString('o')) -Encoding UTF8
+                    $vmJson = az @graphArgs 2>$null
+                }
+                if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($vmJson)) {
+                    Write-Step 'x az graph query failed.' Red; exit 1
+                }
             }
             $vms        = @(($vmJson | ConvertFrom-Json).data)
             $cacheLabel = '[live]'
@@ -1074,26 +1123,32 @@ $isAdmin     = ([Security.Principal.WindowsPrincipal][Security.Principal.Windows
                  [Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $NoEntraAuth) {
-    Write-Step "Adding to hosts: $hostsLine" DarkGray
-    if ($isAdmin) {
-        Add-Content -LiteralPath $hostsPath -Value "`n$hostsLine" -Encoding UTF8
+    $existingLine = @(Get-Content -LiteralPath $hostsPath -ErrorAction SilentlyContinue |
+                        Where-Object { $_ -match [regex]::Escape($hostsMarker) })
+    if ($existingLine.Count -gt 0) {
+        Write-Step "+ Hosts entry already present: 127.0.0.1 $targetDevice" DarkGreen
     } else {
-        $tmp = [System.IO.Path]::GetTempFileName() -replace '\.tmp$', '.ps1'
-        [System.IO.File]::WriteAllText($tmp,
-            "Add-Content -LiteralPath '$hostsPath' -Value `"``n$hostsLine`" -Encoding UTF8",
-            [System.Text.UTF8Encoding]::new($false))
-        Write-Step '! UAC prompt: editing hosts file requires admin' Yellow
-        try {
-            Start-Process powershell -Verb RunAs -Wait `
-                -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$tmp`""
-        } catch {
+        Write-Step "Adding to hosts: $hostsLine" DarkGray
+        if ($isAdmin) {
+            Add-Content -LiteralPath $hostsPath -Value "`n$hostsLine" -Encoding UTF8
+        } else {
+            $tmp = [System.IO.Path]::GetTempFileName() -replace '\.tmp$', '.ps1'
+            [System.IO.File]::WriteAllText($tmp,
+                "Add-Content -LiteralPath '$hostsPath' -Value `"``n$hostsLine`" -Encoding UTF8",
+                [System.Text.UTF8Encoding]::new($false))
+            Write-Step '! UAC prompt: editing hosts file requires admin' Yellow
+            try {
+                Start-Process powershell -Verb RunAs -Wait `
+                    -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$tmp`""
+            } catch {
+                Remove-Item $tmp -ErrorAction SilentlyContinue
+                Write-Step "x Hosts update cancelled: $($_.Exception.Message)" Red; exit 1
+            }
             Remove-Item $tmp -ErrorAction SilentlyContinue
-            Write-Step "x Hosts update cancelled: $($_.Exception.Message)" Red; exit 1
         }
-        Remove-Item $tmp -ErrorAction SilentlyContinue
+        $hostsAdded = $true
+        Write-Step "+ Hosts: 127.0.0.1 $targetDevice" DarkGreen
     }
-    $hostsAdded = $true
-    Write-Step "+ Hosts: 127.0.0.1 $targetDevice" DarkGreen
 }
 
 if (-not $Username) {
