@@ -57,7 +57,7 @@ The `ConnectionManager` class (written in C++, driven from Go):
 | `connectOpenVPN()` | Open OpenVPN datapath |
 | `connectAadProfile(char*, char*)` | Connect AAD profile (username + token) |
 | `acquireAadToken()` | Acquire AAD token via MSAL |
-| `getNewAadToken()` | Refresh token |
+| `getNewAadToken()` | Refresh token — see static-analysis note below |
 | `disconnectVpnProfile()` | Disconnect |
 | `setXmlProfileDataName(string)` | Load VPN profile from XML |
 | `getMSALCache()` / `setCertCreds()` | Cache + certificate management |
@@ -152,6 +152,39 @@ Servers can optionally offer dual-tunnel (HA failover). The client detects this 
 | DNS | systemd-resolved via D-Bus (`SdBus`) |
 | Logging | rsyslog to `/var/log/azurevpnclient/AzureVPNClient.log` |
 | TUN device | `/dev/net/tun` directly via ioctl |
+
+## getNewAadToken() static analysis — does it support mid-session token refresh? (2026-07-05, inconclusive)
+
+Investigated as groundwork for handling the ~60-minute AAD token expiry (the P2S connection
+drops after exactly 3609s — see `docs/troubleshooting.md` if that entry exists, or the
+session history — because the access token used to authenticate it expires and the gateway
+tears down the connection). The question: can `ConnectionManager::getNewAadToken()` be called
+on a *live* connection to refresh the credential in place, avoiding a full reconnect?
+
+`nm -D --defined-only src/libs/libLinuxCore.so | c++filt` resolves the mangled symbol to
+`_ZN17ConnectionManager14getNewAadTokenEv` at file-vaddr `0xb3fd0`, ending at `0xb4010`
+(next symbol `getCertCreds`) — only 64 bytes. `objdump -d` shows **no calls and no
+branches**: it builds a fixed 24-byte struct (hidden-return-pointer ABI, same convention as
+`loadCerts`/`AcquireResult` elsewhere in this file) from `rsi` (the `this` pointer, echoed
+into offset 0) and two other addresses (`rdx`, `rcx`) that point into the *code* ranges of
+`acquireAadToken` and `print_capabilities` (not `.rodata` — confirmed via `objdump -s -j
+.rodata` returning nothing for those addresses).
+
+Two readings are both consistent with the disassembly:
+1. **Dead/stub implementation** — returns a fixed placeholder immediately, does no real work.
+2. **Lazy closure / Go interface value** — the 16-byte (code-ptr, code-ptr) pair could encode
+   a Go `interface{}` (itab + data pointer) that only does real work when something later
+   *calls* it — in which case `getNewAadToken()` itself is just a constructor for a deferred
+   operation, not the operation.
+
+**Not resolved.** A live test (call it via `dlsym` on a running connection near the 60-minute
+mark, observe via syslog/strace whether it does any network I/O or changes `rawStatus`) was
+attempted 2026-07-05 but never reached a connected state to test against — see
+`docs/troubleshooting.md`'s "no account was specified" entry for why. The instrumented shim
+for this test (adds `fn_getNewAadToken` dlsym + a `TEST_REFRESH_AT_SEC`-gated call in the
+poll loop, plus the pump-thread-segfault fix noted in `docs/lib-interface.md`) was not
+committed to `src/` — it lived only in a scratch build context. Whoever picks this up next
+should rebuild it fresh rather than search for it.
 
 ## Relevance for container approach
 

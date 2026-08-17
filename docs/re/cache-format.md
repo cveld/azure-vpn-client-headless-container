@@ -135,6 +135,25 @@ $vpnToken = @{
 - After Level 1 confirmation: the bytes per partition are passed to `cache.Unmarshal`
 - `cache.Unmarshal` expects the standard MSAL cache contract (AccessToken map, Account map, etc.)
 
+## Open discrepancy: `username` vs `preferred_username` (unresolved, 2026-07-05)
+
+This doc's confirmed format above (and the PowerShell snippet) uses `preferred_username`
+in the `Account` object. But `src/device_code.py`'s `build_two_level()` deliberately writes
+`username` instead, with the comment: *"libLinuxCore.so gebruikt 'username' (niet
+'preferred_username') als JSON-veld"* — i.e. a later finding claims the opposite of what
+this doc documents. `wam-auth.ps1` also writes `username`, matching device_code.py, not
+this doc.
+
+Neither convention was confirmed to reliably work in a 2026-07-05 debugging session: caches
+built by both `device_code.py` (fresh device-code and refresh-token paths) and `wam-auth.ps1`
+consistently hit `"no account was specified with public.WithSilentAccount()"` inside
+`connectAadProfile` (see `docs/troubleshooting.md`), while a real successful session's
+captured cache was structurally different again. This was not root-caused — worth a focused
+session to build one cache with each field name (all else identical) and compare outcomes
+directly, ideally using a byte-for-byte diff against a cache pulled via
+`make_cache_available.sh` from the native Windows client's own keyring (the one path known
+to have produced a working connection).
+
 ## Cache builder: src/device_code.py
 
 `src/device_code.py <tenant_id> <audience> <cache_path>` is the canonical tool for creating and

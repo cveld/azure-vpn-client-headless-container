@@ -1,0 +1,32 @@
+# OpenVPN client config for the Azure-Entra-patched build (src-openvpn/).
+# connect-vpn-openvpn.ps1 renders __GATEWAY__ from the selected profile and
+# mounts this file, alongside tls-auth.key / dr.pem / creds / up-dns.sh, at
+# /work inside the container.
+client
+remote __GATEWAY__ 443
+proto tcp
+dev tun
+nobind
+resolv-retry infinite
+
+remote-cert-tls server
+auth SHA256
+cipher AES-256-GCM
+data-ciphers AES-256-GCM
+data-ciphers-fallback AES-256-GCM
+
+tls-timeout 30
+reneg-sec 0
+persist-key
+persist-tun
+
+# tls-auth key = the profile's <serversecret>, client key-direction = 1.
+tls-auth /work/tls-auth.key 1
+ca /work/dr.pem
+auth-user-pass /work/creds
+
+# Apply the pushed DNS server(s) to /etc/resolv.conf when the tunnel comes up.
+script-security 2
+up /work/up-dns.sh
+
+verb 3

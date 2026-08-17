@@ -14,6 +14,10 @@ see **[Building & running the container](docs/running-the-container.md)**. Do no
 .\connect-vpn.ps1       # interactive profile picker — selects profile, runs token flow, starts container
 ```
 
+An alternative launcher, `connect-vpn-openvpn.ps1`, uses a patched stock OpenVPN
+build (`src-openvpn/`) instead of the `libLinuxCore.so` shim — no proprietary binary
+required. Same profile picker and token flow; see [docs/openvpn-patch.md](docs/openvpn-patch.md).
+
 ## Key facts
 
 - Protocol: OpenVPN over TCP; auth-type `aad`, audience `41b23e61-6c1e-4545-b367-cd054e0ed4b4`
@@ -21,7 +25,7 @@ see **[Building & running the container](docs/running-the-container.md)**. Do no
 - Token cache: `SECRETS_DIR/token-cache/<ProfileName>.json` (2-level base64 MSAL format)
 - **Tun interface**: the library strips spaces from the profile name → `My Profile` → `MyProfile`. Linux IFNAMSIZ limit is 15 usable chars; longer names are truncated by the kernel → `Long Profile Name Here` → `Long Profile Nam` (15 chars). Scripts use `| cut -c1-15` / `.Substring(0,15)` to find the correct name.
 - **DNS**: set automatically from syslog PUSH_REPLY (`OPENVPNCONNECTION:Adding DNS <ip>`)
-- Production code is in `src/` — `re/` is research/RE history, do not modify
+- Production code is in `src/` (shim method) and `src-openvpn/` (OpenVPN method) — `re/` is research/RE history, do not modify
 
 ## Profiles
 
@@ -38,6 +42,7 @@ See `docs/architecture.md` for the container naming rules.
 - [src/ folder — production container contents](docs/folder-src.md)
 - [Architecture & auth flow](docs/architecture.md)
 - [libLinuxCore.so interface & implementation choices](docs/lib-interface.md)
+- [OpenVPN patch set (alternative method, no proprietary binary)](docs/openvpn-patch.md)
 - [VPN verification: end-to-end acceptance criteria](docs/vpn-verification.md)
 - [VPN profile: gateway, audience, routes, tls-auth, token](docs/vpn-profile.md)
 - [Troubleshooting](docs/troubleshooting.md)

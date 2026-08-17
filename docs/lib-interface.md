@@ -222,6 +222,20 @@ pthread_create(&pth, nullptr, [](void*) -> void* { pump_body(); return nullptr; 
 This is equivalent to what `startDataPath`'s `std::thread` would do if the gate passed.
 These offsets are specific to the `microsoft-azurevpnclient` 3.0.0 binary.
 
+### Known bug: pump thread starts unconditionally after the 30s status6 wait (unfixed in src/)
+
+`vpnshim.cpp`'s wait loop for `rawStatus==6` gives up after 30s and only prints a warning —
+it does **not** skip starting the pump thread. If the connection genuinely hasn't reached
+`rawStatus==6` (e.g. it failed auth — see `docs/troubleshooting.md`'s "no account was
+specified" entry), starting the pump thread against a ConnectionManager that never reached
+the Connected state **segfaults the whole shim** (confirmed 2026-07-05, reproducible).
+
+Validated fix (in an experimental fork only, not yet ported to `src/vpnshim.cpp`): track the
+`status6` bool outside the wait-loop scope and skip the pump-thread block entirely when
+`!status6`, logging a clean failure instead of crashing. Also consider widening the 30s
+window — it may be too tight under load (unconfirmed whether this alone would have fixed the
+2026-07-05 connection failures, since those were traced to the auth layer, not slowness).
+
 ## certredirect.c — LD_PRELOAD interceptor
 
 **File**: `src/certredirect.c`  

@@ -1,0 +1,178 @@
+diff --git a/src/openvpn/common.h b/src/openvpn/common.h
+index 3a84541..77e265c 100644
+--- a/src/openvpn/common.h
++++ b/src/openvpn/common.h
+@@ -66,7 +66,7 @@ typedef unsigned long ptr_type;
+  * maximum size of a single TLS message (cleartext).
+  * This parameter must be >= PUSH_BUNDLE_SIZE
+  */
+-#define TLS_CHANNEL_BUF_SIZE 2048
++#define TLS_CHANNEL_BUF_SIZE 8192
+ 
+ /* TLS control buffer minimum size
+  *
+diff --git a/src/openvpn/misc.h b/src/openvpn/misc.h
+index 022498c..1e7a74f 100644
+--- a/src/openvpn/misc.h
++++ b/src/openvpn/misc.h
+@@ -66,7 +66,11 @@ struct user_pass
+ #ifdef ENABLE_PKCS11
+ #define USER_PASS_LEN 4096
+ #else
+-#define USER_PASS_LEN 128
++/* AZURE (re/openvpn experiment): the Entra access token is the OpenVPN password
++ * and is ~2.3 KB. The stock 128-byte limit silently truncates it to 127 chars,
++ * so the gateway receives an invalid token in key-method-2 and resets. Raise to
++ * 4096 (the PKCS11 value) so the full token fits. */
++#define USER_PASS_LEN 4096
+ #endif
+     /* Note that username and password are expected to be null-terminated */
+     char username[USER_PASS_LEN];
+diff --git a/src/openvpn/options.c b/src/openvpn/options.c
+index d23c179..37adbcf 100644
+--- a/src/openvpn/options.c
++++ b/src/openvpn/options.c
+@@ -4465,6 +4465,20 @@ options_string(const struct options *o,
+ #undef TLS_CLIENT
+ #undef TLS_SERVER
+ 
++    /* AZURE (re/openvpn experiment): emit the byte-exact OCC options string that
++     * the Microsoft Azure VPN client (libXplatSharedLibrary.so) sends on the
++     * wire (captured via LD_PRELOAD of SSL_write). The Entra gateway compares
++     * this string and resets the session on any mismatch. link-mtu/tun-mtu are
++     * fixed values the vendored client reports (1500/1551) that stock OpenVPN
++     * would not compute, so the whole client-side string is replaced verbatim.
++     * Only the local (sent) string is overridden; the peer-expected string is
++     * left as computed. Enabled by OPENVPN_AZURE_OCC. */
++    if (getenv("OPENVPN_AZURE_OCC") && !remote)
++    {
++        buf_clear(&out);
++        buf_printf(&out, "V4,dev-type tun,link-mtu 1500,tun-mtu 1551,proto TCPv4_CLIENT,keydir 1,cipher AES-256-GCM,auth [null-digest],keysize 256,tls-auth,key-method 2,tls-client");
++    }
++
+     return BSTR(&out);
+ }
+ 
+diff --git a/src/openvpn/ssl.c b/src/openvpn/ssl.c
+index 5a0bf95..804feb2 100644
+--- a/src/openvpn/ssl.c
++++ b/src/openvpn/ssl.c
+@@ -2049,6 +2049,25 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
+     bool ret = false;
+     struct buffer out = alloc_buf_gc(512 * 3, &gc);
+ 
++    /* --- AZURE peer-info override (re/openvpn experiment) ---
++     * Emit only the Microsoft-expected peer-info and return, skipping all stock
++     * IV_ variables. The Azure Entra gateway resets clients that advertise
++     * anything else. Values are baked in at build time. */
++    if (session->opt->push_peer_info_detail > 0)
++    {
++        /* Byte-exact peer-info captured from the vendored client on the wire
++         * (LD_PRELOAD of SSL_write): space-separated, single line, and note the
++         * VER/PLAT values are as the vendored client actually emits them. */
++        buf_printf(&out, "IV_VER=AzMac IV_PLAT=0.1 IV_PROTO=1 IV_PLAT_VER= IV_PLAT_DEVICE_ID=x64");
++        if (write_string(buf, BSTR(&out), -1))
++        {
++            ret = true;
++        }
++        gc_free(&gc);
++        return ret;
++    }
++    /* --- end AZURE override --- */
++
+     if (session->opt->push_peer_info_detail > 1)
+     {
+         /* push version */
+diff --git a/src/openvpn/ssl_openssl.c b/src/openvpn/ssl_openssl.c
+index 2595f87..6d88bfb 100644
+--- a/src/openvpn/ssl_openssl.c
++++ b/src/openvpn/ssl_openssl.c
+@@ -1920,6 +1920,26 @@ bio_read(BIO *bio, struct buffer *buf, const char *desc)
+     return ret;
+ }
+ 
++/* AZURE (re/openvpn experiment): NSS-format TLS keylog for offline decryption.
++ * Enabled by setting OPENVPN_KEYLOG to a writable path; each secret is appended
++ * so tshark -o tls.keylog_file:<path> can decrypt the control-channel TLS. */
++static void
++az_keylog_cb(const SSL *ssl, const char *line)
++{
++    (void) ssl;
++    const char *path = getenv("OPENVPN_KEYLOG");
++    if (!path || !*path)
++    {
++        return;
++    }
++    FILE *f = fopen(path, "a");
++    if (f)
++    {
++        fprintf(f, "%s\n", line);
++        fclose(f);
++    }
++}
++
+ void
+ key_state_ssl_init(struct key_state_ssl *ks_ssl, const struct tls_root_ctx *ssl_ctx, bool is_server, struct tls_session *session)
+ {
+@@ -1937,6 +1957,61 @@ key_state_ssl_init(struct key_state_ssl *ks_ssl, const struct tls_root_ctx *ssl_
+      * from verify callback*/
+     SSL_set_ex_data(ks_ssl->ssl, mydata_index, session);
+ 
++    /* AZURE (re/openvpn experiment): stock OpenVPN sends no TLS SNI. The Azure
++     * multi-tenant VPN gateway front-end needs server_name to route the TLS
++     * session to the right tenant backend, and resets the handshake without it.
++     * Set SNI (client only) from the OPENVPN_SNI env var. */
++    if (!is_server)
++    {
++        const char *az_sni = getenv("OPENVPN_SNI");
++        if (az_sni && *az_sni)
++        {
++            SSL_set_tlsext_host_name(ks_ssl->ssl, az_sni);
++        }
++
++        /* AZURE (re/openvpn experiment): the Microsoft Azure VPN client's
++         * ClientHello additionally advertises ALPN (h2, http/1.1) and
++         * post_handshake_auth; stock OpenVPN sends neither. The Entra gateway
++         * front-end is HTTP/2-capable and appears to fingerprint/route on
++         * these, so match them. ALPN protocols come from OPENVPN_ALPN
++         * (comma-separated); PHA is enabled whenever OPENVPN_PHA is set. */
++        const char *az_alpn = getenv("OPENVPN_ALPN");
++        if (az_alpn && *az_alpn)
++        {
++            unsigned char wire[256];
++            size_t w = 0;
++            const char *p = az_alpn;
++            while (*p && w < sizeof(wire))
++            {
++                const char *comma = strchr(p, ',');
++                size_t seg = comma ? (size_t)(comma - p) : strlen(p);
++                if (seg > 0 && seg < 256 && w + 1 + seg <= sizeof(wire))
++                {
++                    wire[w++] = (unsigned char)seg;
++                    memcpy(wire + w, p, seg);
++                    w += seg;
++                }
++                if (!comma)
++                {
++                    break;
++                }
++                p = comma + 1;
++            }
++            if (w > 0)
++            {
++                SSL_set_alpn_protos(ks_ssl->ssl, wire, (unsigned int)w);
++            }
++        }
++        if (getenv("OPENVPN_PHA"))
++        {
++            SSL_set_post_handshake_auth(ks_ssl->ssl, 1);
++        }
++        if (getenv("OPENVPN_KEYLOG"))
++        {
++            SSL_CTX_set_keylog_callback(SSL_get_SSL_CTX(ks_ssl->ssl), az_keylog_cb);
++        }
++    }
++
+     ASSERT((ks_ssl->ssl_bio = BIO_new(BIO_f_ssl())));
+     ASSERT((ks_ssl->ct_in = BIO_new(BIO_s_mem())));
+     ASSERT((ks_ssl->ct_out = BIO_new(BIO_s_mem())));

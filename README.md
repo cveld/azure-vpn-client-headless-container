@@ -2,7 +2,10 @@
 
 Headless Azure VPN Point-to-Site client running in a Docker container inside WSL. Supports multiple VPN profiles, each with isolated token cache and container instance.
 
-Uses the proprietary `libLinuxCore.so` from the official [Azure VPN Client for Linux](https://learn.microsoft.com/en-us/azure/vpn-gateway/point-to-site-entra-vpn-client-linux) combined with a custom C++ shim to drive it without a GUI.
+Two connection methods are included:
+
+- **Shim** (default) — the proprietary `libLinuxCore.so` from the official [Azure VPN Client for Linux](https://learn.microsoft.com/en-us/azure/vpn-gateway/point-to-site-entra-vpn-client-linux), driven headlessly by a custom C++ shim.
+- **OpenVPN** — a patched stock OpenVPN 2.6.14 build that speaks the Azure Entra P2S protocol directly, with no proprietary binary involved. See [OpenVPN-based alternative](#openvpn-based-alternative) below.
 
 ## How it works
 
@@ -37,7 +40,8 @@ That's it. On first run `connect-vpn.ps1` guides you through everything interact
 ## Repository layout
 
 ```
-connect-vpn.ps1         # Interactive launcher with profile picker
+connect-vpn.ps1         # Interactive launcher with profile picker (shim method)
+connect-vpn-openvpn.ps1 # Interactive launcher with profile picker (OpenVPN method)
 run.ps1                 # Simple fixed-name launcher (single profile)
 fetch-libs.ps1          # One-time setup: downloads libLinuxCore.so etc.
 fetch-libs.sh           # WSL-side helper for fetch-libs.ps1
@@ -57,6 +61,13 @@ src/
 ├── dr.pem              # DigiCert Global Root G2 (public; the TLS CA for Azure gateways)
 ├── fetch-dr-pem.sh     # Regenerates dr.pem
 └── libs/               # gitignored — filled by fetch-libs.ps1
+
+src-openvpn/            # OpenVPN method — no proprietary binary required
+├── Containerfile       # Builds patched stock OpenVPN 2.6.14 from upstream + patch
+├── openvpn-azure.patch # The 5-file patch (see docs/openvpn-patch.md)
+├── openvpn.ovpn.template  # Client config template, gateway substituted at connect time
+├── up-dns.sh           # OpenVPN --up script: applies pushed DNS to resolv.conf
+└── extract_token.py    # Reads the raw access token out of the MSAL cache
 
 docs/                   # Architecture, troubleshooting, profile details, RE notes
 ```
@@ -91,6 +102,16 @@ connect-vpn.ps1
 Token audience: `41b23e61-6c1e-4545-b367-cd054e0ed4b4` (Azure VPN Client app ID).
 The library uses its own hardcoded MSAL client ID (`c632b3df-…`); `az` CLI tokens do not work.
 
+## OpenVPN-based alternative
+
+This repository also includes a second connection method that does not depend on Microsoft's proprietary `libLinuxCore.so` binary, which Microsoft retires on 2026-08-31. It uses a patched stock OpenVPN 2.6.14 build plus the same profile selection and Entra token acquisition flow already used by the existing launcher. The OpenVPN launcher extracts the Azure profile's `serversecret`, renders an OpenVPN config, pulls the raw access token from the local MSAL cache, and brings the tunnel up in a container as `tun0`. To use this path, run:
+
+```powershell
+.\connect-vpn-openvpn.ps1
+```
+
+See [docs/openvpn-patch.md](docs/openvpn-patch.md) for the patch set, why each change is needed, and the full build/run details.
+
 ## Troubleshooting
 
 See [docs/troubleshooting.md](docs/troubleshooting.md).
@@ -102,6 +123,7 @@ See [docs/troubleshooting.md](docs/troubleshooting.md).
 - [Building & running the container](docs/running-the-container.md)
 - [src/ folder contents](docs/folder-src.md)
 - [libLinuxCore.so interface](docs/lib-interface.md)
+- [OpenVPN patch set (alternative method)](docs/openvpn-patch.md)
 - [VPN profile format](docs/vpn-profile.md)
 - [Verification & acceptance criteria](docs/vpn-verification.md)
 - [Troubleshooting](docs/troubleshooting.md)

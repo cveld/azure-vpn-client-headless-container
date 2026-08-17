@@ -90,18 +90,24 @@ without a network round-trip).
 Reproduced: a password of 1300 chars works, 2151 chars (the real token) fails.
 `--max-packet-size` does not help (control-channel payload caps at ~2148).
 
-**Fix**: rebuild OpenVPN with a larger buffer. The `Containerfile` compiles
-OpenVPN from source with `TLS_CHANNEL_BUF_SIZE = 8192`:
-```dockerfile
-RUN F=$(grep -rl 'define TLS_CHANNEL_BUF_SIZE' src/) \
-    && sed -i 's/#define TLS_CHANNEL_BUF_SIZE[[:space:]].*/#define TLS_CHANNEL_BUF_SIZE 8192/' "$F"
-```
+**Fix**: rebuild OpenVPN with a larger buffer. This repo's `src-openvpn/Containerfile`
+builds OpenVPN from source with `openvpn-azure.patch` applied, which raises
+`TLS_CHANNEL_BUF_SIZE` to 8192 (see [docs/openvpn-patch.md](openvpn-patch.md) for the
+full patch set and rationale).
 
 Background: the official Azure VPN client does not use stock OpenVPN but its own C++
 reimplementation of the OpenVPN protocol (`Networking-VPNXplatLib`, class `OpenVpnFraming`)
-without this buffer limit — see `docs/linux-client-analysis.md`.
+without this buffer limit — see `docs/re/linux-client-analysis.md`.
 
 ## Connection reset after VERIFY OK (after TLS handshake)
+
+> **Update:** the "fundamental limitation" conclusion below is superseded. A patched
+> stock OpenVPN 2.6.14 **does** connect successfully — see
+> [docs/openvpn-patch.md](openvpn-patch.md) and `src-openvpn/`. The root cause was not
+> an unbridgeable protocol gap but three specific, fixable mismatches: the truncated
+> access token (`USER_PASS_LEN`), the OCC options string, and the `peer-info` string.
+> The section below is kept as reasoning history — it documents what stock OpenVPN
+> looks like *before* those patches are applied.
 
 ```
 VERIFY OK: depth=0, CN=<gateway>.vpn.azure.com
@@ -276,6 +282,50 @@ explicit routes to the ovpn file:
 route 10.x.x.0 255.255.255.0
 ```
 Remove `route-nopull` to accept all routes pushed by the gateway (redirects all traffic).
+
+## "Acquiring token silently failed... no account was specified" / "Failure connecting profile: Operation cancelled by the user"
+
+```
+level=error msg="Acquiring token silently failed with error: no account was specified with public.WithSilentAccount(), or the specified account is invalid" layer=MSAL
+level=error msg="acquireTokenInteratively error: exec: \"xdg-open,x-www-browser,www-browser\": executable file not found in $PATH" layer=MSAL
+...
+Sending connection event: Trace msg: Failure connecting profile: Operation cancelled by the user.
+```
+
+**Investigated 2026-07-05** (during a session trying to reproduce this headlessly for an
+unrelated RE spike; see `docs/re/cache-format.md` for the deeper cache-format angle).
+
+This is `connectAadProfile`'s *own internal* MSAL silent-acquire attempt (independent of the
+cache we hand it — see `docs/lib-interface.md`) failing to find a matching account, then
+falling back to an interactive browser popup that can't exist in a headless container. When
+it happens, the connection typically never reaches `rawStatus==6` — it either stalls
+indefinitely at `rawStatus==2`, or the library reports the failure and disconnects within
+a few seconds.
+
+**Ruled out** while chasing this (do not re-litigate these — confirmed dead ends):
+- Not caused by an expired vs. freshly-issued token — reproduced with both.
+- Not caused by using a `device_code.py`-built cache vs. a `wam-auth.ps1`-built cache —
+  reproduced with both.
+- Not caused by a second concurrent P2S session under the same account — reproduced even
+  with the account's only other session already exited.
+- Both `azurevpn-shim:local` (built 2026-06-24) and a freshly-rebuilt image reproduce it
+  identically — not a stale-image issue, and `python3` is absent from both (so
+  `runner.sh`'s dynamic `AAD_USERNAME` extraction silently produces an **empty** string in
+  both images — worth fixing, but passing the real UPN via a hardcoded/known-good value did
+  not fix the auth failure either, so it's not the sole cause).
+
+**Not yet confirmed, but the strongest remaining lead**: a real, working session's captured
+`VPN_TOKEN` cache (from `docker logs`, `[shim] connectAadProfile(...)` line) has a visibly
+different `Account` object shape/key order than what `src/device_code.py` /
+`wam-auth.ps1` currently hand-build (see the "username vs preferred_username" discrepancy
+noted in `docs/re/cache-format.md`). The working session's cache likely originated via the
+`make_cache_available.sh` path (extracting the cache directly from the native Windows Azure
+VPN Client's own keyring) rather than either hand-built path. This was **not conclusively
+verified** — the specific working cache inspected may have already been overwritten by
+later test runs before its exact shape could be diffed field-by-field. Next session: capture
+a known-good cache immediately after a successful `connect-vpn.ps1` run (copy it aside
+before running any other token flow) and diff it byte-for-byte against a fresh
+`device_code.py` / `wam-auth.ps1` output for the same account.
 
 ## Azure CLI not logged in to tenant
 
