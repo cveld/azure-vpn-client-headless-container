@@ -1,0 +1,28 @@
+# Terraform + Azure CLI sidecar for running `terraform` through the VPN tunnel.
+#
+# Built FROM the official az-cli image (not a custom auth setup): the Terraform
+# azurerm provider can shell out to `az` (ARM_USE_CLI=true) and reuse whatever
+# az login/context the host already has (az-context.ps1, `az login`, ...) by
+# bind-mounting AZURE_CONFIG_DIR into the container. Service-principal auth via
+# ARM_CLIENT_ID/ARM_CLIENT_SECRET/... also works — az itself is then unused.
+#
+#   docker build -f src-terraform/Containerfile -t terraform-az:local src-terraform
+#
+# Run with --network container:<vpn-container-name> (see terraform-vpn.ps1) so
+# it shares the VPN container's tun interface and routes.
+FROM mcr.microsoft.com/azure-cli:latest
+ARG TERRAFORM_VERSION=1.16.0
+
+RUN set -eux; \
+    curl -fsSL -o /tmp/tf.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"; \
+    if command -v unzip >/dev/null 2>&1; then \
+        unzip -o /tmp/tf.zip -d /usr/local/bin; \
+    else \
+        python3 -c "import zipfile; zipfile.ZipFile('/tmp/tf.zip').extractall('/usr/local/bin')"; \
+    fi; \
+    rm /tmp/tf.zip; \
+    chmod +x /usr/local/bin/terraform; \
+    terraform -version
+
+WORKDIR /workspace
+ENTRYPOINT ["terraform"]

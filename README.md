@@ -43,6 +43,7 @@ That's it. On first run `connect-vpn.ps1` guides you through everything interact
 connect-vpn.ps1         # Interactive launcher with profile picker (shim method)
 connect-vpn-openvpn.ps1 # Interactive launcher with profile picker (OpenVPN method)
 run.ps1                 # Simple fixed-name launcher (single profile)
+terraform-vpn.ps1       # Run `terraform` through the tunnel (sidecar container)
 fetch-libs.ps1          # One-time setup: downloads libLinuxCore.so etc.
 fetch-libs.sh           # WSL-side helper for fetch-libs.ps1
 .env.example            # Config template
@@ -69,6 +70,8 @@ src-openvpn/            # OpenVPN method — no proprietary binary required
 ├── up-dns.sh           # OpenVPN --up script: applies pushed DNS to resolv.conf
 └── extract_token.py    # Reads the raw access token out of the MSAL cache
 
+src-terraform/          # Terraform sidecar — shares the VPN container's network namespace
+├── Containerfile       # Builds terraform-az:local from mcr.microsoft.com/azure-cli, pinned terraform binary
 docs/                   # Architecture, troubleshooting, profile details, RE notes
 ```
 
@@ -112,6 +115,28 @@ This repository also includes a second connection method that does not depend on
 
 See [docs/openvpn-patch.md](docs/openvpn-patch.md) for the patch set, why each change is needed, and the full build/run details.
 
+## Running Terraform through the tunnel
+
+`terraform-vpn.ps1` runs `terraform` inside a sidecar container that shares the VPN
+container's network namespace (`--network container:<vpn-container>`), so Terraform can
+reach Azure resources only reachable over the P2S tunnel (private endpoints, private DNS
+zones, internal load balancers, ...). DNS is copied from the VPN container's
+`/etc/resolv.conf`, and Azure auth is inherited from the current PowerShell session
+(service principal env vars, or the logged-in `az` CLI config).
+
+```powershell
+# Starts the VPN container for the profile if it isn't already running
+.\terraform-vpn.ps1 -VpnProfile "My Profile" plan
+
+# VPN container already running, exactly one vpn-* container -> auto-detected
+.\terraform-vpn.ps1 init
+
+# Terraform working directory defaults to the current directory; override with -Dir
+.\terraform-vpn.ps1 -Dir C:\work\terraform\my-stack apply -auto-approve
+```
+
+See [docs/terraform-vpn.md](docs/terraform-vpn.md) for the full auth/DNS details.
+
 ## Troubleshooting
 
 See [docs/troubleshooting.md](docs/troubleshooting.md).
@@ -124,6 +149,7 @@ See [docs/troubleshooting.md](docs/troubleshooting.md).
 - [src/ folder contents](docs/folder-src.md)
 - [libLinuxCore.so interface](docs/lib-interface.md)
 - [OpenVPN patch set (alternative method)](docs/openvpn-patch.md)
+- [terraform-vpn.ps1 — running Terraform through the tunnel](docs/terraform-vpn.md)
 - [VPN profile format](docs/vpn-profile.md)
 - [Verification & acceptance criteria](docs/vpn-verification.md)
 - [Troubleshooting](docs/troubleshooting.md)
