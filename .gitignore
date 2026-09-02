@@ -32,3 +32,6 @@ downloaded/
 .cache
 # tenant names, preferences are stored in this file:
 rdp-connect-settings.json
+
+# Local-only skills
+.agents/skills/chrome-relay

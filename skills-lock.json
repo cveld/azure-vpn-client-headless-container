@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "chrome-relay": {
+      "source": "kiluazen/kstack",
+      "sourceType": "github",
+      "skillPath": "skills/chrome-relay/SKILL.md",
+      "computedHash": "c31e18dd595aed168a2c2b85ac0e568c3bf0a560064e223a182be9aeee180c18"
+    }
+  }
+}
