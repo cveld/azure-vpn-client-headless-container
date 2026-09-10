@@ -12,14 +12,22 @@
   /etc/resolv.conf (it isn't shared via --network container:, only the network
   stack is).
 
-  Azure auth is inherited from the current PowerShell session, same as
-  az-context.ps1 leaves it:
+  Azure auth:
     - ARM_CLIENT_ID/ARM_CLIENT_SECRET/ARM_TENANT_ID/ARM_SUBSCRIPTION_ID set
       (service principal) -> passed straight through, az CLI in the sidecar
       is unused.
-    - otherwise -> AZURE_CONFIG_DIR (or ~/.azure) is bind-mounted into the
-      sidecar and ARM_USE_CLI=true, so the azurerm provider shells out to the
-      already-logged-in az CLI.
+    - otherwise -> the sidecar gets its own, separate, Linux-native az CLI
+      login (ARM_USE_CLI=true), stored at
+      %USERPROFILE%\.azurecustomers-container\<vpn-container-name> and kept
+      across runs. This is NOT your Windows az CLI session inherited or
+      mounted -- Windows az CLI defaults to WAM (Web Account Manager) as its
+      sign-in broker, and WAM-issued tokens can't be handed to a Linux
+      container at all (the refresh capability lives in the Windows account
+      broker, not in a portable cache file). The first time a given VPN
+      container's az CLI cache doesn't exist yet, this runs
+      Connect-AzCliForContainer.ps1 automatically -- a one-time (or
+      occasional, once the login eventually expires) interactive device-code
+      prompt, auto-scoped to the right tenant from the VPN profile's own XML.
 .PARAMETER VpnProfile
   VPN profile name (exact match, as shown by connect-vpn.ps1). Starts the
   container if it isn't running yet.
@@ -29,6 +37,17 @@
 .PARAMETER Dir
   Terraform working directory (Windows path). Defaults to the current
   directory. Mounted into the sidecar at /workspace.
+.PARAMETER AzDoOrg
+  Azure DevOps organization name (e.g. "IGH-Solution"). When set, pulls a
+  cached OAuth token for https://dev.azure.com/<org> from the host's git
+  credential helper (git credential fill — same Git Credential Manager
+  flow a normal `git clone` on this machine already uses) and hands it to
+  the sidecar so `terraform init` can fetch git:: module sources from that
+  org without prompting. The container has no git credentials of its own
+  and no TTY to prompt on, so without this a private git:: source just
+  hangs forever waiting for input that never arrives. Best-effort: if the
+  host has no cached credential for that org, this warns and continues —
+  useful only when your modules actually live in that org.
 .PARAMETER ListProfiles
   List installed VPN profiles (name, derived container name, running status)
   and exit — same source (rasphone.pbk) as connect-vpn.ps1's picker.
@@ -44,12 +63,16 @@
 .EXAMPLE
   .\terraform-vpn.ps1 init
   # auto-detects the VPN container if exactly one is running
+.EXAMPLE
+  .\terraform-vpn.ps1 -AzDoOrg IGH-Solution init
+  # also authenticates git:: module sources hosted in that AzDO org
 #>
 [CmdletBinding(PositionalBinding = $false)]
 param(
     [string]$VpnProfile = '',
     [string]$Container  = '',
     [string]$Dir        = (Get-Location).Path,
+    [string]$AzDoOrg    = '',
     [switch]$ListProfiles,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$TerraformArgs = @()
@@ -122,6 +145,21 @@ $ROOT   = "/mnt/$_drive$_path"
 # ── Resolve the VPN container name ────────────────────────────────────────────
 function Get-ContainerNameFromProfile ([string]$Name) {
     'vpn-' + ($Name -replace '[^a-zA-Z0-9-]', '-' -replace '-{2,}', '-').ToLower().Trim('-')
+}
+
+# Looks up the AAD tenant ID for whichever installed VPN profile derives to
+# $ContainerName, so Connect-AzCliForContainer.ps1 can sign into the right
+# tenant without the caller needing to know/pass it explicitly.
+function Get-VpnProfileTenantId ([string]$ContainerName) {
+    if (-not (Test-Path $PBK)) { return $null }
+    foreach ($r in (Read-Pbk $PBK)) {
+        if ($r.Hex.Count -eq 0) { continue }
+        if ((Get-ContainerNameFromProfile $r.Name) -ne $ContainerName) { continue }
+        $xml = ConvertFrom-ProfileHex $r.Hex
+        if ($xml -match '<tenant>https://login\.microsoftonline\.com/([^/]+)') { return $Matches[1] }
+        return $null
+    }
+    return $null
 }
 
 # ── -ListProfiles: print installed VPN profiles and exit ─────────────────────
@@ -205,17 +243,53 @@ if ($env:ARM_CLIENT_ID) {
         if ($val) { $envLines += "$v=$val" }
     }
 } else {
-    $azConfigDir = if ($env:AZURE_CONFIG_DIR) { $env:AZURE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.azure' }
-    if (-not (Test-Path $azConfigDir)) {
-        Write-Step "x No az CLI login found ($azConfigDir missing) and ARM_CLIENT_ID not set." Red
-        Write-Step '  Run az login (or az-context.ps1) first, or set ARM_CLIENT_ID/... for a service principal.' Yellow
-        exit 1
+    # Windows az CLI defaults to WAM (Web Account Manager) as its sign-in
+    # broker; WAM-issued tokens aren't portable (the refresh capability lives
+    # in the Windows account broker, not in msal_token_cache.bin), so a
+    # Windows az CLI login can't be handed to a Linux container at all. Give
+    # the sidecar its own, separate, Linux-native az CLI login instead --
+    # keyed on $CNTR so it's always resolvable regardless of whether this run
+    # used -VpnProfile, -Container, or auto-detection.
+    $containerAzDir = Join-Path $env:USERPROFILE ".azurecustomers-container\$CNTR"
+    # Linux az CLI (no keyring available -> unencrypted FilePersistence) names
+    # this msal_token_cache.json, not .bin like Windows' DPAPI-protected one.
+    $cacheFile = Join-Path $containerAzDir 'msal_token_cache.json'
+    if (-not (Test-Path $cacheFile)) {
+        Write-Step "No container-side az login found for '$CNTR' yet." Yellow
+        $tenantId = Get-VpnProfileTenantId $CNTR
+        $connectParams = @{ Dir = $containerAzDir }
+        if ($tenantId) { $connectParams.TenantId = $tenantId }
+        & (Join-Path $PSScriptRoot 'Connect-AzCliForContainer.ps1') @connectParams
+        if ($LASTEXITCODE -ne 0) { Write-Step 'x az login for the sidecar failed.' Red; exit 1 }
     }
-    Write-Step "+ Using az CLI auth (mounting $azConfigDir)" DarkGreen
-    $azConfigWsl = ConvertTo-WslPath $azConfigDir
+    Write-Step "+ Using az CLI auth (container login: $containerAzDir)" DarkGreen
+    $azConfigWsl = ConvertTo-WslPath $containerAzDir
     $azMountArgs = @('-v', "${azConfigWsl}:/root/.azure")
     $envLines += 'ARM_USE_CLI=true'
     if ($env:ARM_SUBSCRIPTION_ID) { $envLines += "ARM_SUBSCRIPTION_ID=$($env:ARM_SUBSCRIPTION_ID)" }
+}
+
+# Never let git block forever on a prompt the sidecar has no TTY to answer.
+$envLines += 'GIT_TERMINAL_PROMPT=0'
+
+# ── Azure DevOps git auth: hand the host's cached credential to the sidecar ──
+if ($AzDoOrg) {
+    Write-Step "Fetching cached git credential for dev.azure.com/$AzDoOrg..." Cyan
+    $credInput = "protocol=https`nhost=dev.azure.com`npath=$AzDoOrg`n`n"
+    $credOutput = $credInput | git credential fill 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Step "~ Could not get a cached git credential for '$AzDoOrg' ($($credOutput -join ' ')) — git:: module sources in that org will fail." Yellow
+    } else {
+        $azdoUser = ($credOutput | Where-Object { $_ -match '^username=' }) -replace '^username=', ''
+        $azdoPass = ($credOutput | Where-Object { $_ -match '^password=' }) -replace '^password=', ''
+        if ($azdoUser -and $azdoPass) {
+            Write-Step '+ Git credential for dev.azure.com found' DarkGreen
+            $envLines += "GIT_AZDO_USERNAME=$azdoUser"
+            $envLines += "GIT_AZDO_PASSWORD=$azdoPass"
+        } else {
+            Write-Step "~ git credential fill returned no username/password for '$AzDoOrg'." Yellow
+        }
+    }
 }
 
 # env-file so secrets never appear on the wsl/docker command line.
