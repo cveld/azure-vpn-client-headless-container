@@ -22,7 +22,7 @@ Keeping it separate means:
 
 ```powershell
 # VPN container not running yet — starts it via connect-vpn.ps1
-.\terraform-vpn.ps1 -VpnProfile "IGH - Insurances" plan
+.\terraform-vpn.ps1 -VpnProfile "My Profile" plan
 
 # VPN container already running under a known name
 .\terraform-vpn.ps1 -Container vpn-igh-insurances apply -auto-approve
@@ -34,7 +34,7 @@ Keeping it separate means:
 .\terraform-vpn.ps1 -Dir C:\work\terraform\my-stack plan
 
 # Module sources are git:: URLs in this AzDO org -- see "Git module auth" below
-.\terraform-vpn.ps1 -VpnProfile "IGH - Insurances" -AzDoOrg IGH-Solution init
+.\terraform-vpn.ps1 -VpnProfile "My Profile" -AzDoOrg MyOrg init
 ```
 
 Everything after the recognized parameters is passed straight through to
@@ -93,7 +93,7 @@ inside the sidecar needs its own auth, separate from the ARM/azurerm side
 above — pass `-AzDoOrg <org-name>`:
 
 ```powershell
-.\terraform-vpn.ps1 -VpnProfile "My Profile" -AzDoOrg IGH-Solution init
+.\terraform-vpn.ps1 -VpnProfile "My Profile" -AzDoOrg MyOrg init
 ```
 
 This pulls a cached git credential for `dev.azure.com/<org>` from the

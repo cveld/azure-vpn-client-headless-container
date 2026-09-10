@@ -140,7 +140,7 @@ module sources need `-AzDoOrg <org-name>` to authenticate.
 .\terraform-vpn.ps1 -Dir C:\work\terraform\my-stack apply -auto-approve
 
 # Module sources are git:: URLs in this AzDO org
-.\terraform-vpn.ps1 -VpnProfile "My Profile" -AzDoOrg IGH-Solution init
+.\terraform-vpn.ps1 -VpnProfile "My Profile" -AzDoOrg MyOrg init
 ```
 
 See [docs/terraform-vpn.md](docs/terraform-vpn.md) for the full auth/DNS details.

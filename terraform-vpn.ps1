@@ -38,7 +38,7 @@
   Terraform working directory (Windows path). Defaults to the current
   directory. Mounted into the sidecar at /workspace.
 .PARAMETER AzDoOrg
-  Azure DevOps organization name (e.g. "IGH-Solution"). When set, pulls a
+  Azure DevOps organization name (e.g. "MyOrg"). When set, pulls a
   cached OAuth token for https://dev.azure.com/<org> from the host's git
   credential helper (git credential fill — same Git Credential Manager
   flow a normal `git clone` on this machine already uses) and hands it to
@@ -57,14 +57,14 @@
 .EXAMPLE
   .\terraform-vpn.ps1 -ListProfiles
 .EXAMPLE
-  .\terraform-vpn.ps1 -VpnProfile "IGH - Insurances" plan
+  .\terraform-vpn.ps1 -VpnProfile "My Profile" plan
 .EXAMPLE
   .\terraform-vpn.ps1 -Container vpn-my-profile apply -auto-approve
 .EXAMPLE
   .\terraform-vpn.ps1 init
   # auto-detects the VPN container if exactly one is running
 .EXAMPLE
-  .\terraform-vpn.ps1 -AzDoOrg IGH-Solution init
+  .\terraform-vpn.ps1 -AzDoOrg MyOrg init
   # also authenticates git:: module sources hosted in that AzDO org
 #>
 [CmdletBinding(PositionalBinding = $false)]
