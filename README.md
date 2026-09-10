@@ -44,6 +44,7 @@ connect-vpn.ps1         # Interactive launcher with profile picker (shim method)
 connect-vpn-openvpn.ps1 # Interactive launcher with profile picker (OpenVPN method)
 run.ps1                 # Simple fixed-name launcher (single profile)
 terraform-vpn.ps1       # Run `terraform` through the tunnel (sidecar container)
+Connect-AzCliForContainer.ps1  # One-time (or occasional) device-code login for the sidecar's own az CLI cache
 fetch-libs.ps1          # One-time setup: downloads libLinuxCore.so etc.
 fetch-libs.sh           # WSL-side helper for fetch-libs.ps1
 .env.example            # Config template
@@ -71,7 +72,8 @@ src-openvpn/            # OpenVPN method — no proprietary binary required
 └── extract_token.py    # Reads the raw access token out of the MSAL cache
 
 src-terraform/          # Terraform sidecar — shares the VPN container's network namespace
-├── Containerfile       # Builds terraform-az:local from mcr.microsoft.com/azure-cli, pinned terraform binary
+├── Containerfile       # Builds terraform-az:local from mcr.microsoft.com/azure-cli, pinned terraform binary + git
+├── entrypoint.sh        # Container ENTRYPOINT: git auth (extraheader, safe.directory, IPv4 pin), then exec terraform
 docs/                   # Architecture, troubleshooting, profile details, RE notes
 ```
 
@@ -121,8 +123,11 @@ See [docs/openvpn-patch.md](docs/openvpn-patch.md) for the patch set, why each c
 container's network namespace (`--network container:<vpn-container>`), so Terraform can
 reach Azure resources only reachable over the P2S tunnel (private endpoints, private DNS
 zones, internal load balancers, ...). DNS is copied from the VPN container's
-`/etc/resolv.conf`, and Azure auth is inherited from the current PowerShell session
-(service principal env vars, or the logged-in `az` CLI config).
+`/etc/resolv.conf`. ARM/azurerm auth is either a service principal's env vars, or a
+Linux-native az CLI login kept in its own per-container cache (Windows az CLI's WAM-broker
+tokens can't be handed to a Linux container at all, so this is a separate login from your
+host's — `Connect-AzCliForContainer.ps1` walks you through it once). Private `git::`
+module sources need `-AzDoOrg <org-name>` to authenticate.
 
 ```powershell
 # Starts the VPN container for the profile if it isn't already running
@@ -133,6 +138,9 @@ zones, internal load balancers, ...). DNS is copied from the VPN container's
 
 # Terraform working directory defaults to the current directory; override with -Dir
 .\terraform-vpn.ps1 -Dir C:\work\terraform\my-stack apply -auto-approve
+
+# Module sources are git:: URLs in this AzDO org
+.\terraform-vpn.ps1 -VpnProfile "My Profile" -AzDoOrg IGH-Solution init
 ```
 
 See [docs/terraform-vpn.md](docs/terraform-vpn.md) for the full auth/DNS details.
