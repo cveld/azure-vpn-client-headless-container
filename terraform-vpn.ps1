@@ -48,6 +48,29 @@
   hangs forever waiting for input that never arrives. Best-effort: if the
   host has no cached credential for that org, this warns and continues —
   useful only when your modules actually live in that org.
+.PARAMETER AzDoTenant
+  az-context.ps1 tenant alias (see c:\prg\az-context.ps1) that has actual
+  membership in the -AzDoOrg Azure DevOps organization. Only needed when the
+  terraform config itself declares a literal `provider "azuredevops" {}`
+  block (e.g. modules that manage AzDO resources) — that provider defaults to
+  running its own `az account get-access-token` internally, and it runs
+  wherever terraform executes, i.e. inside the sidecar, using the sidecar's
+  own az CLI login. That login is scoped for ARM access to your Azure
+  subscriptions and typically has no presence in the separate AzDO org, so
+  the provider fails with "not authorized to access Azure DevOps
+  Organization ...". When set, this switches the *host's* az CLI to that
+  tenant (via az-context.ps1, so it doesn't clobber any other tenant's cached
+  context), fetches an AzDO REST token there, and hands it to the sidecar as
+  TF_VAR_azuredevops_accesstoken / TF_VAR_azuredevops_accesstoken_bring_your_own_enabled=true
+  — same env-file mechanism as the git credential below, which is the
+  confirmed-working way to cross a secret into the container (an ambient
+  host env var set before invoking this script does not reliably cross).
+  The AzDO org's backing tenant is often not the same tenant that holds the
+  Azure subscriptions you deploy into — check which az-context alias
+  actually has org membership before assuming this is the same tenant your
+  VPN profile authenticates against. Best-effort: if the token fetch fails,
+  this warns and continues — only needed for configs using the azuredevops
+  provider.
 .PARAMETER ListProfiles
   List installed VPN profiles (name, derived container name, running status)
   and exit — same source (rasphone.pbk) as connect-vpn.ps1's picker.
@@ -66,6 +89,9 @@
 .EXAMPLE
   .\terraform-vpn.ps1 -AzDoOrg MyOrg init
   # also authenticates git:: module sources hosted in that AzDO org
+.EXAMPLE
+  .\terraform-vpn.ps1 -AzDoOrg MyOrg -AzDoTenant mycompany.com plan
+  # also fetches an AzDO REST token for the azuredevops Terraform provider
 #>
 [CmdletBinding(PositionalBinding = $false)]
 param(
@@ -73,6 +99,7 @@ param(
     [string]$Container  = '',
     [string]$Dir        = (Get-Location).Path,
     [string]$AzDoOrg    = '',
+    [string]$AzDoTenant = '',
     [switch]$ListProfiles,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$TerraformArgs = @()
@@ -272,6 +299,20 @@ if ($env:ARM_CLIENT_ID) {
 # Never let git block forever on a prompt the sidecar has no TTY to answer.
 $envLines += 'GIT_TERMINAL_PROMPT=0'
 
+# ── Provider plugin cache ─────────────────────────────────────────────────────
+# Each run is --rm, so without this every `terraform init` re-downloads all
+# provider binaries from scratch. Reuse the same cache dir the host's own
+# .terraformrc already points at (see plugin_cache_dir in ~/.terraformrc).
+# MAY_BREAK_DEPENDENCY_LOCK_FILE is required for the cache to be safe when
+# multiple sidecars run `init` concurrently (separate workloads, separate
+# terminals) — see https://developer.hashicorp.com/terraform/cli/config/config-file#plugin_cache_dir_may_break_dependency_lock_file
+$pluginCacheWin = 'C:\temp\terraform_plugin_cache'
+if (-not (Test-Path $pluginCacheWin)) { New-Item -ItemType Directory -Path $pluginCacheWin | Out-Null }
+$pluginCacheWsl = ConvertTo-WslPath $pluginCacheWin
+$pluginCacheMountArgs = @('-v', "${pluginCacheWsl}:/root/.terraform.d/plugin-cache")
+$envLines += 'TF_PLUGIN_CACHE_DIR=/root/.terraform.d/plugin-cache'
+$envLines += 'TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE=true'
+
 # ── Azure DevOps git auth: hand the host's cached credential to the sidecar ──
 if ($AzDoOrg) {
     Write-Step "Fetching cached git credential for dev.azure.com/$AzDoOrg..." Cyan
@@ -292,6 +333,27 @@ if ($AzDoOrg) {
     }
 }
 
+# ── Azure DevOps REST token: for the azuredevops Terraform provider itself ──
+# Separate from the git credential above — that's a Basic-auth credential
+# scoped for `git clone` over HTTPS, this is a bearer token for the AzDO
+# REST API that the azuredevops provider's own resources need.
+if ($AzDoTenant) {
+    Write-Step "Fetching Azure DevOps org access token (az-context tenant '$AzDoTenant')..." Cyan
+    & c:\prg\az-context.ps1 -tenant $AzDoTenant
+    if ($LASTEXITCODE -ne 0) {
+        Write-Step "~ az-context.ps1 -tenant $AzDoTenant failed — azuredevops provider resources will fail." Yellow
+    } else {
+        $azdoToken = az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv
+        if ($LASTEXITCODE -eq 0 -and $azdoToken) {
+            Write-Step '+ Azure DevOps org access token fetched' DarkGreen
+            $envLines += "TF_VAR_azuredevops_accesstoken=$azdoToken"
+            $envLines += 'TF_VAR_azuredevops_accesstoken_bring_your_own_enabled=true'
+        } else {
+            Write-Step "~ Could not fetch an Azure DevOps org token — azuredevops provider resources will fail." Yellow
+        }
+    }
+}
+
 # env-file so secrets never appear on the wsl/docker command line.
 $envFileWin = Join-Path $env:TEMP "terraform-vpn-$([guid]::NewGuid()).env"
 [System.IO.File]::WriteAllText($envFileWin, ($envLines -join "`n"), [System.Text.UTF8Encoding]::new($false))
@@ -304,12 +366,12 @@ $tfDirWsl = ConvertTo-WslPath $Dir
 Write-Step "Running terraform in $Dir (via $CNTR)..." Cyan
 try {
     $dockerArgs = @(
-        'docker', 'run', '--rm', '-it',
+        'docker', 'run', '--rm', '-i',
         '--network', "container:$CNTR",
         '-v', "${resolvWsl}:/etc/resolv.conf:ro",
         '-v', "${tfDirWsl}:/workspace",
         '--env-file', $envFileWsl
-    ) + $azMountArgs + @($IMAGE) + $TerraformArgs
+    ) + $azMountArgs + $pluginCacheMountArgs + @($IMAGE) + $TerraformArgs
 
     wsl -d Ubuntu-20.04 -- @dockerArgs
     exit $LASTEXITCODE

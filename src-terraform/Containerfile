@@ -11,7 +11,7 @@
 # Run with --network container:<vpn-container-name> (see terraform-vpn.ps1) so
 # it shares the VPN container's tun interface and routes.
 FROM mcr.microsoft.com/azure-cli:latest
-ARG TERRAFORM_VERSION=1.16.0
+ARG TERRAFORM_VERSION=1.16.2
 
 # git is required for terraform to fetch git:: module sources (e.g. AzDO repos)
 RUN tdnf install -y git && tdnf clean all
