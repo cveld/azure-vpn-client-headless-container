@@ -159,6 +159,27 @@ publishes the ports, so it has to be created with `-Publish` (done automatically
 `-Method openvpn` (default) or `shim` selects the launcher. The client keeps using the real host name (for TLS) and only
 overrides its address; see the consuming app for how.
 
+### Reverse proxy through the local Caddy (`-Caddy`)
+
+For HTTPS sites behind the tunnel, `-Caddy` publishes each forwarded host under its **real name** in a browser:
+
+```powershell
+.\forward-vpn.ps1 -VpnProfile "My Profile" -Caddy -Forward "8443=dev-int-app.example.com:443"
+# browse to https://dev-int-app.example.com/
+.\forward-vpn.ps1 -VpnProfile "My Profile" -Stop   # also removes the Caddy routes and hosts entries
+```
+
+Per host it registers, through the Caddy admin API (`-CaddyAdmin`, default `http://127.0.0.1:2019`, server `srv0`):
+
+- a `tls internal` automation policy (`@id fwd-vpn-tls-<host>`), so Caddy does not try ACME for a public name;
+- a `reverse_proxy` route (`@id fwd-vpn-<host>`) to `127.0.0.1:<local port>` that speaks TLS to the upstream with SNI `<host>`;
+- a hosts entry `127.0.0.1 <host>  # fwd-vpn-caddy` (one UAC prompt when not elevated).
+
+The Host header and the name stay the same, so cookies and SSO redirect URIs of the real site keep working. Caddy's
+local CA must be trusted by the browser (it is, once any `*.localhost` route has been opened). The routes are runtime
+routes: a Caddy restart or reload drops them, rerun the script. While the VPN or forward is down the name points at a
+dead localhost; `-Stop` restores it.
+
 ## Troubleshooting
 
 See [docs/troubleshooting.md](docs/troubleshooting.md).
