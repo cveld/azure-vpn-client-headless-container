@@ -145,6 +145,20 @@ module sources need `-AzDoOrg <org-name>` to authenticate.
 
 See [docs/terraform-vpn.md](docs/terraform-vpn.md) for the full auth/DNS details.
 
+## Forwarding ports to private services
+
+`forward-vpn.ps1` exposes hosts behind the tunnel (private endpoints) on `127.0.0.1` of Windows, so a local app can use
+them without the Windows VPN client. A `socat` sidecar shares the VPN container's network namespace; the VPN container
+publishes the ports, so it has to be created with `-Publish` (done automatically when `forward-vpn.ps1 -VpnProfile` starts it).
+
+```powershell
+.orward-vpn.ps1 -VpnProfile "My Profile" -Forward "1433=sql-x.database.windows.net:1433","8443=aif-x.openai.azure.com:443"
+.orward-vpn.ps1 -VpnProfile "My Profile" -Stop
+```
+
+`-Method openvpn` (default) or `shim` selects the launcher. The client keeps using the real host name (for TLS) and only
+overrides its address; see the consuming app for how.
+
 ## Troubleshooting
 
 See [docs/troubleshooting.md](docs/troubleshooting.md).

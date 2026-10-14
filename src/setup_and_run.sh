@@ -59,11 +59,20 @@ cp "$SRC/src/"*.sh                       "$WORK/" 2>/dev/null || true
 
 echo "work dir: $WORK"
 
+# VPN_PUBLISH="1433,8443": publish these ports on 127.0.0.1 (WSL localhost, so also Windows localhost). Only the
+# owner of the network namespace can publish; forward-vpn.ps1 runs the listeners in sidecars that share it.
+PUBLISH_ARGS=()
+IFS=',' read -ra _ports <<< "${VPN_PUBLISH:-}"
+for _p in "${_ports[@]}"; do
+  [[ -n "$_p" ]] && PUBLISH_ARGS+=(-p "127.0.0.1:${_p}:${_p}")
+done
+
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" \
   --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=SYS_PTRACE \
   --device=/dev/net/tun \
   --sysctl net.ipv4.ip_forward=1 \
+  "${PUBLISH_ARGS[@]}" \
   -v "$WORK:/work" \
   --entrypoint sh azurevpn-shim:local "/work/$RUNNER"
 echo "started container: $NAME"
