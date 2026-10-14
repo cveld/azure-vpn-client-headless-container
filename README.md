@@ -152,8 +152,8 @@ them without the Windows VPN client. A `socat` sidecar shares the VPN container'
 publishes the ports, so it has to be created with `-Publish` (done automatically when `forward-vpn.ps1 -VpnProfile` starts it).
 
 ```powershell
-.orward-vpn.ps1 -VpnProfile "My Profile" -Forward "1433=sql-x.database.windows.net:1433","8443=aif-x.openai.azure.com:443"
-.orward-vpn.ps1 -VpnProfile "My Profile" -Stop
+.\forward-vpn.ps1 -VpnProfile "My Profile" -Forward "1433=sql-x.database.windows.net:1433","8443=aif-x.openai.azure.com:443"
+.\forward-vpn.ps1 -VpnProfile "My Profile" -Stop
 ```
 
 `-Method openvpn` (default) or `shim` selects the launcher. The client keeps using the real host name (for TLS) and only
