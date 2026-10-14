@@ -175,6 +175,9 @@ Per host it registers, through the Caddy admin API (`-CaddyAdmin`, default `http
 - a `reverse_proxy` route (`@id fwd-vpn-<host>`) to `127.0.0.1:<local port>` that speaks TLS to the upstream with SNI `<host>`;
 - a hosts entry `127.0.0.1 <host>  # fwd-vpn-caddy` (one UAC prompt when not elevated).
 
+Caddy is expected to run natively on Windows (PM2 process `caddy`), so `127.0.0.1:<local port>` is the published VPN
+container port; with Caddy in Docker the upstream would need `host.docker.internal` instead.
+
 The Host header and the name stay the same, so cookies and SSO redirect URIs of the real site keep working. Caddy's
 local CA must be trusted by the browser (it is, once any `*.localhost` route has been opened). The routes are runtime
 routes: a Caddy restart or reload drops them, rerun the script. While the VPN or forward is down the name points at a
