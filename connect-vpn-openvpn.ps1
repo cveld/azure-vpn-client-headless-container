@@ -10,9 +10,12 @@
 .EXAMPLE
   .\connect-vpn-openvpn.ps1
   .\connect-vpn-openvpn.ps1 -Profile "IGH - Insurances"
+.PARAMETER Publish
+  Ports to publish on 127.0.0.1 so forward-vpn.ps1 can expose services behind the tunnel, e.g. 1433,8443.
 #>
 param(
-    [string]$VpnProfile = ''
+    [string]$VpnProfile = '',
+    [int[]]$Publish = @()
 )
 $ErrorActionPreference = 'Stop'
 $Interactive = [string]::IsNullOrEmpty($VpnProfile)
@@ -391,7 +394,8 @@ if ($LASTEXITCODE -ne 0) {
 
 # ── Start container ───────────────────────────────────────────────────────────
 Write-Step "Starting container ($CNTR)..." Cyan
-wsl -d Ubuntu-20.04 -- bash -lc "docker rm -f $CNTR >/dev/null 2>&1; docker run -d --name $CNTR --cap-add=NET_ADMIN --device=/dev/net/tun -e OPENVPN_SNI=$($p.Gw) -e OPENVPN_ALPN=h2,http/1.1 -e OPENVPN_PHA=1 -e OPENVPN_AZURE_OCC=1 -v '${workDirWsl}:/work' $IMAGE --config '/work/$($p.SafeName).ovpn'"
+$publishArgs = ($Publish | ForEach-Object { "-p 127.0.0.1:${_}:${_}" }) -join ' '
+wsl -d Ubuntu-20.04 -- bash -lc "docker rm -f $CNTR >/dev/null 2>&1; docker run -d --name $CNTR $publishArgs --cap-add=NET_ADMIN --device=/dev/net/tun -e OPENVPN_SNI=$($p.Gw) -e OPENVPN_ALPN=h2,http/1.1 -e OPENVPN_PHA=1 -e OPENVPN_AZURE_OCC=1 -v '${workDirWsl}:/work' $IMAGE --config '/work/$($p.SafeName).ovpn'"
 if ($LASTEXITCODE -ne 0) {
     Write-Step "x Container start failed." Red; exit 1
 }

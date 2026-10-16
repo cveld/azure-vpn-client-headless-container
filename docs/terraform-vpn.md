@@ -127,6 +127,38 @@ setup and invisible from a plain host-side `git clone`:
   everywhere else (confirmed: a bind-mounted clone showed 0 tags vs 215 for
   the identical clone on the container's own native filesystem).
 
+## AzDO provider token (`azuredevops` Terraform provider)
+
+Separate again from both the ARM/azurerm auth and the git module auth above:
+if the terraform config declares a literal `provider "azuredevops" {}` block
+(e.g. a module that manages AzDO resources, not just fetches its own source
+from one), that provider needs a *bearer token for the AzDO REST API*. Unless
+told otherwise it fetches this itself, internally, via
+`az account get-access-token` — and since terraform runs inside the sidecar,
+that call uses the sidecar's own az CLI login, which is scoped for ARM access
+and typically has no membership in the AzDO org at all. Symptom:
+
+```
+Error: You are not authorized to access Azure DevOps Organization https://dev.azure.com/<org>
+```
+
+Pass `-AzDoTenant <az-context-alias>` — the `az-context.ps1` tenant alias
+that *does* have membership in the `-AzDoOrg` organization (often a different
+tenant than the one holding the Azure subscriptions you deploy into — check
+before assuming they're the same):
+
+```powershell
+.\terraform-vpn.ps1 -VpnProfile "My Profile" -AzDoOrg MyOrg -AzDoTenant mycompany.com plan
+```
+
+This switches the **host's** az CLI to that tenant via `az-context.ps1`
+(isolated per-tenant config dir, doesn't clobber any other tenant's cached
+login), fetches a token there, and hands it to the sidecar through the same
+`--env-file` mechanism as everything else in this script — as
+`TF_VAR_azuredevops_accesstoken` /
+`TF_VAR_azuredevops_accesstoken_bring_your_own_enabled=true`. Best-effort:
+only needed when the config actually uses the `azuredevops` provider.
+
 ## Image
 
 ```powershell

@@ -9,9 +9,12 @@
 .EXAMPLE
   .\connect-vpn.ps1
   .\connect-vpn.ps1 -Profile "IGH - Insurances"
+.PARAMETER Publish
+  Ports to publish on 127.0.0.1 so forward-vpn.ps1 can expose services behind the tunnel, e.g. 1433,8443.
 #>
 param(
-    [string]$VpnProfile = ''
+    [string]$VpnProfile = '',
+    [int[]]$Publish = @()
 )
 $ErrorActionPreference = 'Stop'
 $Interactive = [string]::IsNullOrEmpty($VpnProfile)
@@ -381,7 +384,8 @@ if ($LASTEXITCODE -ne 0) {
 
 # ── Start container ───────────────────────────────────────────────────────────
 Write-Step "Starting container ($CNTR)..." Cyan
-wsl -d Ubuntu-20.04 -- bash -lc "cd '$ROOT' && bash src/setup_and_run.sh $CNTR $RUNR '$cacheWsl' '$xmlWsl'"
+$publishEnv = if ($Publish.Count) { "VPN_PUBLISH='$($Publish -join ',')' " } else { '' }
+wsl -d Ubuntu-20.04 -- bash -lc "cd '$ROOT' && ${publishEnv}bash src/setup_and_run.sh $CNTR $RUNR '$cacheWsl' '$xmlWsl'"
 if ($LASTEXITCODE -ne 0) {
     Write-Step "x Container start failed." Red; exit 1
 }
