@@ -167,6 +167,8 @@ if ($caddyMaps) {
             '@id' = "$ID_PREFIX$h"; match = @(@{ host = @($h) }); terminal = $true
             handle = @(@{
                 handler = 'reverse_proxy'; upstreams = @(@{ dial = "127.0.0.1:$($m.Local)" })
+                # Caddy would otherwise send the upstream address as Host; the site answers 404 for that.
+                headers = @{ request = @{ set = @{ Host = @('{http.request.host}') } } }
                 transport = @{ protocol = 'http'; tls = @{ server_name = $h } }
             })
         } | Out-Null
