@@ -22,6 +22,12 @@
   URIs and the Host header stay as on the real site. Intended for HTTPS hosts (target port 443). The routes are runtime
   routes (@id fwd-vpn-*) and disappear on a Caddy restart/reload; rerun the script to restore them. -Stop removes them
   and the hosts entries again.
+.PARAMETER CaddyHost
+  Like -Caddy, but only for the listed forwarded hosts (the other -Forward mappings stay plain 127.0.0.1 ports, without a
+  hosts entry). Use it when only a web site has to be browsed under its real name and SQL or other services must keep
+  resolving normally.
+.PARAMETER CaddyOff
+  Remove the Caddy routes and hosts entries of an earlier -Caddy/-CaddyHost run, without touching the sidecar.
 .PARAMETER CaddyAdmin
   Caddy admin API URL. Default http://127.0.0.1:2019 (never localhost: that resolves to ::1 first and hangs).
 .PARAMETER Stop
@@ -38,6 +44,8 @@ param(
     [string]$Container = '',
     [ValidateSet('shim', 'openvpn')][string]$Method = 'openvpn',
     [switch]$Caddy,
+    [string[]]$CaddyHost = @(),
+    [switch]$CaddyOff,
     [string]$CaddyAdmin = 'http://127.0.0.1:2019',
     [switch]$Stop
 )
@@ -146,10 +154,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not start the forwarding sidecar.' }
 
 foreach ($m in $maps) { Write-Step "+ 127.0.0.1:$($m.Local) -> $($m.Host):$($m.Port) (via $CNTR)" DarkGreen }
 
-if ($Caddy) {
+$caddyMaps = if ($Caddy) { @($maps) } else { @($maps | Where-Object { $CaddyHost -contains $_.Host }) }
+if ($caddyMaps) {
     # Idempotent: drop what an earlier run registered, then add one route + one internal-TLS policy per host.
     Remove-CaddyObjects
-    foreach ($m in $maps) {
+    foreach ($m in $caddyMaps) {
         $h = $m.Host
         Invoke-CaddyApi POST '/config/apps/tls/automation/policies' @{
             '@id' = "${ID_PREFIX}tls-$h"; subjects = @($h); issuers = @(@{ module = 'internal' })
@@ -163,6 +172,9 @@ if ($Caddy) {
         } | Out-Null
         Write-Step "+ Caddy: https://$h/ -> 127.0.0.1:$($m.Local) (TLS upstream, SNI $h)" DarkGreen
     }
-    Update-HostsEntries -AddHosts @($maps.Host | Select-Object -Unique)
-    Write-Step "+ Hosts: 127.0.0.1 $(@($maps.Host | Select-Object -Unique) -join ', ')" DarkGreen
+    Update-HostsEntries -AddHosts @($caddyMaps.Host | Select-Object -Unique)
+    Write-Step "+ Hosts: 127.0.0.1 $(@($caddyMaps.Host | Select-Object -Unique) -join ', ')" DarkGreen
+} elseif ($CaddyOff) {
+    Remove-CaddyObjects
+    Update-HostsEntries
 }
