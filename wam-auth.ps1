@@ -20,6 +20,8 @@
   Windows path to write the 2-level JSON cache file.
 .PARAMETER Force
   Force token acquisition even if the existing cache is still valid.
+.PARAMETER NoPrompt
+  Silent auth only: exit 1 instead of opening the interactive sign-in window (for unattended callers).
 .EXAMPLE
   .\wam-auth.ps1 -ProfileName "My Company VPN" `
                  -TenantId 00000000-0000-0000-0000-000000000000 `
@@ -29,7 +31,8 @@ param(
     [Parameter(Mandatory)] [string]$ProfileName,
     [Parameter(Mandatory)] [string]$TenantId,
     [Parameter(Mandatory)] [string]$CachePath,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$NoPrompt
 )
 
 $ErrorActionPreference = 'Stop'
@@ -153,6 +156,10 @@ public class MsalFileCache {
     }
 
     if (-not $result) {
+        if ($NoPrompt) {
+            Write-Host '  x WAM: silent auth not possible and -NoPrompt is set: interactive sign-in needed.' -ForegroundColor Red
+            exit 1
+        }
         $result = $app.AcquireTokenInteractive($scopes).ExecuteAsync().GetAwaiter().GetResult()
         Write-Host "  + WAM: interactive auth succeeded ($($result.Account.Username))" -ForegroundColor DarkGreen
     }

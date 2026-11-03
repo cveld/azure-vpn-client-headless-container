@@ -15,6 +15,9 @@
   Explicit VPN container name. Without -VpnProfile and -Container the only running vpn-* container is used.
 .PARAMETER Method
   Launcher used to start the VPN container: openvpn (default, connect-vpn-openvpn.ps1) or shim (connect-vpn.ps1).
+.PARAMETER ExtraPublish
+  Extra ports the VPN container has to publish on 127.0.0.1 when this script starts it, for other sidecars that share its
+  namespace (proxy-vpn.ps1 uses 8888). They are not forwarded here; the container is only created with them.
 .PARAMETER Caddy
   Also publish every forwarded host under its own name through the local Caddy (admin API, -CaddyAdmin): adds a hosts
   entry 127.0.0.1 <host>, a `tls internal` policy and a reverse_proxy route <host> -> 127.0.0.1:<local port> that talks
@@ -30,6 +33,9 @@
   Remove the Caddy routes and hosts entries of an earlier -Caddy/-CaddyHost run, without touching the sidecar.
 .PARAMETER CaddyAdmin
   Caddy admin API URL. Default http://127.0.0.1:2019 (never localhost: that resolves to ::1 first and hangs).
+.PARAMETER NoPrompt
+  Unattended run (openvpn method): when the VPN container has to be started, refresh the token silently only and exit 4
+  instead of opening a sign-in window or printing a device code when an interactive sign-in is needed.
 .PARAMETER Stop
   Remove the forwarding sidecar (and the -Caddy routes and hosts entries) and exit.
 .EXAMPLE
@@ -40,12 +46,14 @@
 [CmdletBinding()]
 param(
     [string[]]$Forward = @(),
+    [int[]]$ExtraPublish = @(),
     [string]$VpnProfile = '',
     [string]$Container = '',
     [ValidateSet('shim', 'openvpn')][string]$Method = 'openvpn',
     [switch]$Caddy,
     [string[]]$CaddyHost = @(),
     [switch]$CaddyOff,
+    [switch]$NoPrompt,
     [string]$CaddyAdmin = 'http://127.0.0.1:2019',
     [switch]$Stop
 )
@@ -104,6 +112,14 @@ $maps = foreach ($f in $Forward) {
     [pscustomobject]@{ Local = [int]$Matches[1]; Host = $Matches[2]; Port = [int]$Matches[3] }
 }
 
+# -CaddyOff alone (no -Forward) only needs Caddy and the hosts file, so it also works while Docker or the VPN container is down.
+# With -Forward it is the keeper's "site off" state: forward as usual, just without the Caddy routes.
+if ($CaddyOff -and -not $Stop -and -not $maps) {
+    Remove-CaddyObjects
+    Update-HostsEntries
+    exit 0
+}
+
 $running = @(Invoke-Wsl docker ps --format '{{.Names}}' 2>$null)
 if ($Container) { $CNTR = $Container }
 elseif ($VpnProfile) { $CNTR = (Get-ContainerNameFromProfile $VpnProfile) + $(if ($Method -eq 'openvpn') { '-ovpn' } else { '' }) }
@@ -125,8 +141,11 @@ if (-not $maps) { throw 'Pass at least one -Forward mapping.' }
 
 if ($running -notcontains $CNTR) {
     if (-not $VpnProfile) { throw "VPN container '$CNTR' is not running; pass -VpnProfile to start it." }
-    Write-Step "Starting VPN container for '$VpnProfile' (publishing $($maps.Local -join ', '))..." Cyan
-    & (Join-Path $PSScriptRoot $(if ($Method -eq 'shim') { 'connect-vpn.ps1' } else { 'connect-vpn-openvpn.ps1' })) -VpnProfile $VpnProfile -Publish $maps.Local
+    Write-Step "Starting VPN container for '$VpnProfile' (publishing $((@($maps.Local) + $ExtraPublish) -join ', '))..." Cyan
+    $connect = @{ VpnProfile = $VpnProfile; Publish = [int[]](@($maps.Local) + $ExtraPublish) }
+    if ($NoPrompt -and $Method -ne 'shim') { $connect.NoPrompt = $true }
+    & (Join-Path $PSScriptRoot $(if ($Method -eq 'shim') { 'connect-vpn.ps1' } else { 'connect-vpn-openvpn.ps1' })) @connect
+    if ($LASTEXITCODE -eq 4) { Write-Step 'x Interactive sign-in needed for the VPN token.' Red; exit 4 }
     if ($LASTEXITCODE -ne 0) { throw 'VPN connect failed.' }
 }
 

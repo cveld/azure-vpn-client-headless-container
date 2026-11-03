@@ -12,10 +12,14 @@
   .\connect-vpn-openvpn.ps1 -Profile "IGH - Insurances"
 .PARAMETER Publish
   Ports to publish on 127.0.0.1 so forward-vpn.ps1 can expose services behind the tunnel, e.g. 1433,8443.
+.PARAMETER NoPrompt
+  For unattended callers: silent token refresh only. Never opens a sign-in window or prints a device code; exits 4 when an
+  interactive sign-in is needed (run this script again without -NoPrompt, in a visible terminal).
 #>
 param(
     [string]$VpnProfile = '',
-    [int[]]$Publish = @()
+    [int[]]$Publish = @(),
+    [switch]$NoPrompt
 )
 $ErrorActionPreference = 'Stop'
 $Interactive = [string]::IsNullOrEmpty($VpnProfile)
@@ -300,12 +304,12 @@ if ($p.Auth -eq 'Entra') {
     if (Test-Path $wamScript) {
         Write-Step 'Trying WAM authentication...' Cyan
         try {
-            & $wamScript -ProfileName $p.Name -TenantId $p.Tenant -CachePath $cache
+            & $wamScript -ProfileName $p.Name -TenantId $p.Tenant -CachePath $cache -NoPrompt:$NoPrompt
         } catch {
             Write-Step "~ WAM error: $($_.Exception.Message)" Yellow
         }
         if ($LASTEXITCODE -ne 0) {
-            Write-Step '~ WAM failed — device code flow will be used if needed' Yellow
+            Write-Step $(if ($NoPrompt) { '~ WAM failed — trying the refresh token (-NoPrompt: no device code)' } else { '~ WAM failed — device code flow will be used if needed' }) Yellow
         }
     }
 }
@@ -320,7 +324,9 @@ if ($LASTEXITCODE -ne 0) {
 # device_code.py: validates format and exits 0 if WAM wrote a valid token;
 # otherwise refreshes via refresh token or runs the device code flow.
 Write-Step 'Validating/refreshing token cache...' Cyan
-wsl -d Ubuntu-20.04 -- python3 "$ROOT/src/device_code.py" $p.Tenant $p.Audience $cacheWsl
+$deviceArgs = @($p.Tenant, $p.Audience, $cacheWsl) + $(if ($NoPrompt) { '--no-prompt' } else { @() })
+wsl -d Ubuntu-20.04 -- python3 "$ROOT/src/device_code.py" @deviceArgs
+if ($LASTEXITCODE -eq 3) { Write-Step 'x Interactive sign-in needed (token and refresh token no longer work). Run connect-vpn-openvpn.ps1 without -NoPrompt.' Red; exit 4 }
 if ($LASTEXITCODE -ne 0) { Write-Step 'x Token flow failed.' Red; exit 1 }
 Write-Step '+ Token cache ready' DarkGreen
 

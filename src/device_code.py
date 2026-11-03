@@ -324,15 +324,25 @@ def run_device_code(tenant_id, audience, cache_path):
     print(f"Expires:     {time.strftime('%Y-%m-%d %H:%M', time.localtime(now + expires_in))}")
 
 
-def main():
-    if len(sys.argv) < 4:
-        sys.exit("Usage: device_code.py <tenant_id> <audience> <cache_path>")
+EXIT_SIGNIN_REQUIRED = 3
 
-    tenant_id, audience, cache_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def main():
+    args = [a for a in sys.argv[1:] if a != "--no-prompt"]
+    no_prompt = len(args) != len(sys.argv) - 1
+    if len(args) < 3:
+        sys.exit("Usage: device_code.py <tenant_id> <audience> <cache_path> [--no-prompt]")
+
+    tenant_id, audience, cache_path = args[0], args[1], args[2]
 
     if os.path.exists(cache_path):
         if try_migrate(cache_path, audience, tenant_id):
             return  # token geldig, geen device code nodig
+
+    if no_prompt:
+        # Unattended caller (the launchpad keeper): nobody can read a device code, so fail with a distinct exit code.
+        print("Interactive sign-in needed: no valid token and the refresh token did not work (--no-prompt).", file=sys.stderr)
+        sys.exit(EXIT_SIGNIN_REQUIRED)
 
     run_device_code(tenant_id, audience, cache_path)
 
