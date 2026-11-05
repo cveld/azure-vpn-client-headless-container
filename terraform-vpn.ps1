@@ -296,6 +296,12 @@ if ($env:ARM_CLIENT_ID) {
     if ($env:ARM_SUBSCRIPTION_ID) { $envLines += "ARM_SUBSCRIPTION_ID=$($env:ARM_SUBSCRIPTION_ID)" }
 }
 
+# Pass the azurerm backend's Entra ID data-plane auth switch through when the
+# host sets it (works with both auth modes above): a storage account with
+# shared-key access disabled needs it for state reads/writes. Only forwarded
+# when set, so other repos keep their current behaviour.
+if ($env:ARM_USE_AZUREAD) { $envLines += "ARM_USE_AZUREAD=$($env:ARM_USE_AZUREAD)" }
+
 # Never let git block forever on a prompt the sidecar has no TTY to answer.
 $envLines += 'GIT_TERMINAL_PROMPT=0'
 

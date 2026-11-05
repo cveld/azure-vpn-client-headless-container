@@ -58,6 +58,10 @@ same way they do inside the VPN container itself.
 | `$env:ARM_CLIENT_ID` set (service principal) | `ARM_CLIENT_ID`/`ARM_CLIENT_SECRET`/`ARM_TENANT_ID`/`ARM_SUBSCRIPTION_ID` passed through as-is. The az CLI baked into the sidecar image is unused. |
 | Otherwise | The sidecar gets its own, separate, **Linux-native** az CLI login (`ARM_USE_CLI=true`). |
 
+In both cases `ARM_USE_AZUREAD` is forwarded when it is set on the host, so
+the azurerm backend can use Entra ID auth against a state storage account that
+has shared-key access disabled. When it is unset, nothing is passed.
+
 The "otherwise" row is *not* your Windows az CLI session inherited or
 mounted — that was the original design, and it never actually worked. Windows
 az CLI defaults to WAM (Web Account Manager) as its sign-in broker, and
