@@ -302,6 +302,14 @@ if ($env:ARM_CLIENT_ID) {
 # when set, so other repos keep their current behaviour.
 if ($env:ARM_USE_AZUREAD) { $envLines += "ARM_USE_AZUREAD=$($env:ARM_USE_AZUREAD)" }
 
+# Terraform's own log switches, so a host-side $env:TF_LOG='DEBUG' reaches the
+# sidecar. TF_LOG_PATH is deliberately not forwarded: it would name a path
+# inside the container, not on the host. Only forwarded when set.
+foreach ($v in 'TF_LOG', 'TF_LOG_CORE', 'TF_LOG_PROVIDER') {
+    $val = [Environment]::GetEnvironmentVariable($v)
+    if ($val) { $envLines += "$v=$val" }
+}
+
 # Never let git block forever on a prompt the sidecar has no TTY to answer.
 $envLines += 'GIT_TERMINAL_PROMPT=0'
 

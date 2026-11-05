@@ -62,6 +62,10 @@ In both cases `ARM_USE_AZUREAD` is forwarded when it is set on the host, so
 the azurerm backend can use Entra ID auth against a state storage account that
 has shared-key access disabled. When it is unset, nothing is passed.
 
+Likewise `TF_LOG`, `TF_LOG_CORE` and `TF_LOG_PROVIDER` are forwarded when set on the
+host, so `$env:TF_LOG = 'DEBUG'` takes effect inside the sidecar. `TF_LOG_PATH` is
+not forwarded, because it would name a path inside the container.
+
 The "otherwise" row is *not* your Windows az CLI session inherited or
 mounted — that was the original design, and it never actually worked. Windows
 az CLI defaults to WAM (Web Account Manager) as its sign-in broker, and
