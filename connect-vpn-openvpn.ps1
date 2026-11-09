@@ -389,8 +389,8 @@ if (-not $dockerOk) {
 Write-Step '+ Docker available' DarkGreen
 
 # ── Build image if needed ─────────────────────────────────────────────────────
-wsl -d Ubuntu-20.04 -- docker image inspect $IMAGE 2>$null | Out-Null
-if ($LASTEXITCODE -ne 0) {
+$servicesVersion = wsl -d Ubuntu-20.04 -- docker image inspect $IMAGE --format '{{index .Config.Labels "local.azurevpn.services"}}' 2>$null
+if ($LASTEXITCODE -ne 0 -or $servicesVersion -ne '1') {
     Write-Step "Building image $IMAGE (this may take a while)..." Yellow
     wsl -d Ubuntu-20.04 -- bash -lc "cd '$ROOT' && docker build -f src-openvpn/Containerfile -t $IMAGE src-openvpn"
     if ($LASTEXITCODE -ne 0) {
@@ -400,6 +400,22 @@ if ($LASTEXITCODE -ne 0) {
 
 # ── Start container ───────────────────────────────────────────────────────────
 Write-Step "Starting container ($CNTR)..." Cyan
+# Retain published ports needed by persisted proxy/forward configuration.
+$serviceDir = Join-Path $workDir 'vpn-services'
+$servicePorts = @()
+$proxyConfig = Join-Path $serviceDir 'proxy.conf'
+if (Test-Path -LiteralPath $proxyConfig) {
+    foreach ($line in Get-Content -LiteralPath $proxyConfig) {
+        if ($line -match '^Port (\d+)$') { $servicePorts += [int]$Matches[1] }
+    }
+}
+$forwardConfig = Join-Path $serviceDir 'forward.conf'
+if (Test-Path -LiteralPath $forwardConfig) {
+    foreach ($line in Get-Content -LiteralPath $forwardConfig) {
+        if ($line -match '^(\d+) ') { $servicePorts += [int]$Matches[1] }
+    }
+}
+$Publish = [int[]](@($Publish) + $servicePorts | Select-Object -Unique)
 $publishArgs = ($Publish | ForEach-Object { "-p 127.0.0.1:${_}:${_}" }) -join ' '
 wsl -d Ubuntu-20.04 -- bash -lc "docker rm -f $CNTR >/dev/null 2>&1; docker run -d --name $CNTR $publishArgs --cap-add=NET_ADMIN --device=/dev/net/tun -e OPENVPN_SNI=$($p.Gw) -e OPENVPN_ALPN=h2,http/1.1 -e OPENVPN_PHA=1 -e OPENVPN_AZURE_OCC=1 -v '${workDirWsl}:/work' $IMAGE --config '/work/$($p.SafeName).ovpn'"
 if ($LASTEXITCODE -ne 0) {

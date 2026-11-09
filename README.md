@@ -148,7 +148,7 @@ See [docs/terraform-vpn.md](docs/terraform-vpn.md) for the full auth/DNS details
 ## Forwarding ports to private services
 
 `forward-vpn.ps1` exposes hosts behind the tunnel (private endpoints) on `127.0.0.1` of Windows, so a local app can use
-them without the Windows VPN client. A `socat` sidecar shares the VPN container's network namespace; the VPN container
+them without the Windows VPN client. `socat` runs inside the OpenVPN container; the VPN container
 publishes the ports, so it has to be created with `-Publish` (done automatically when `forward-vpn.ps1 -VpnProfile` starts it).
 
 ```powershell
@@ -156,8 +156,38 @@ publishes the ports, so it has to be created with `-Publish` (done automatically
 .\forward-vpn.ps1 -VpnProfile "My Profile" -Stop
 ```
 
-`-Method openvpn` (default) or `shim` selects the launcher. The client keeps using the real host name (for TLS) and only
+Built-in forwarding and proxy services require `-Method openvpn` (default); the legacy shim image is not supported for these services. The client keeps using the real host name (for TLS) and only
 overrides its address; see the consuming app for how.
+
+### One container per VPN profile
+
+OpenVPN, tinyproxy and all socat forwards now run in the same container. The
+`proxy-vpn.ps1` and `forward-vpn.ps1` interfaces remain unchanged, but do not
+create proxy/forward sidecars. Their `-Stop` switches stop only the selected
+service. Configuration lives in the profile's `vpn-services/` directory under
+`SECRETS_DIR/vpn-openvpn`, while PID files and logs live in `/run/vpn-services`.
+A watchdog restores configured services after container restarts and child
+process failures, using the VPN's current DNS rather than a sidecar DNS snapshot.
+Soft VPN reconnects also refresh pushed DNS. On disconnect the DNS hook restores
+the container's bootstrap resolver, so the public gateway remains resolvable.
+
+For an existing installation, rebuild `src-openvpn/Containerfile`, reconnect
+with the required `-Publish` ports, then rerun the proxy/forward commands.
+Those commands remove the old matching sidecars. Subsequent reconnects retain
+ports required by persisted service configuration. Health checks can use:
+
+```powershell
+wsl -d Ubuntu-20.04 -- docker exec <vpn-container> /usr/local/sbin/vpn-services status proxy
+wsl -d Ubuntu-20.04 -- docker exec <vpn-container> /usr/local/sbin/vpn-services status forward
+```
+
+Test services without a VPN or credentials:
+
+```powershell
+wsl -d Ubuntu-20.04 -- docker run --rm -v <repo-wsl-path>/tests:/tests:ro --entrypoint /usr/bin/tini azurevpn-openvpn:local -- bash /tests/vpn-services.sh
+.\tests\vpn-services-restart.ps1
+wsl -d Ubuntu-20.04 -- docker run --rm -v <repo-wsl-path>:/source:ro --entrypoint /bin/bash azurevpn-openvpn:local /source/tests/vpn-dns.sh
+```
 
 ### Reverse proxy through the local Caddy (`-Caddy`)
 

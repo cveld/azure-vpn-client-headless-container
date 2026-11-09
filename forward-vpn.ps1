@@ -3,10 +3,9 @@
 .SYNOPSIS
   Forwards local ports (127.0.0.1 on Windows) to hosts that are only reachable through the VPN tunnel.
 .DESCRIPTION
-  Runs a socat sidecar in the VPN container's network namespace (--network container:<vpn>), so it uses tun0 and the
-  tunnel DNS. A sidecar cannot publish ports itself: the VPN container must have been started with the same ports
-  (connect-vpn.ps1 -VpnProfile <name> -Publish 1433,8443). The sidecar is named fwd-<vpn container> and is replaced on
-  every run; stop it with -Stop.
+  Runs socat inside the OpenVPN container, using its tunnel and DNS. The VPN container must have been started with
+  the same ports (connect-vpn-openvpn.ps1 -VpnProfile <name> -Publish 1433,8443).
+  Configuration persists with the profile and is restored after restarts; stop forwarding with -Stop.
 .PARAMETER Forward
   One or more "<local port>=<host>:<port>" mappings, e.g. "1433=sql-x.database.windows.net:1433".
 .PARAMETER VpnProfile
@@ -14,9 +13,9 @@
 .PARAMETER Container
   Explicit VPN container name. Without -VpnProfile and -Container the only running vpn-* container is used.
 .PARAMETER Method
-  Launcher used to start the VPN container: openvpn (default, connect-vpn-openvpn.ps1) or shim (connect-vpn.ps1).
+  Built-in services require openvpn. The shim option is retained only to stop legacy sidecars.
 .PARAMETER ExtraPublish
-  Extra ports the VPN container has to publish on 127.0.0.1 when this script starts it, for other sidecars that share its
+  Extra ports the VPN container has to publish on 127.0.0.1 when this script starts it, for other services that share its
   namespace (proxy-vpn.ps1 uses 8888). They are not forwarded here; the container is only created with them.
 .PARAMETER Caddy
   Also publish every forwarded host under its own name through the local Caddy (admin API, -CaddyAdmin): adds a hosts
@@ -30,14 +29,14 @@
   hosts entry). Use it when only a web site has to be browsed under its real name and SQL or other services must keep
   resolving normally.
 .PARAMETER CaddyOff
-  Remove the Caddy routes and hosts entries of an earlier -Caddy/-CaddyHost run, without touching the sidecar.
+  Remove the Caddy routes and hosts entries of an earlier -Caddy/-CaddyHost run, without touching forwarding.
 .PARAMETER CaddyAdmin
   Caddy admin API URL. Default http://127.0.0.1:2019 (never localhost: that resolves to ::1 first and hangs).
 .PARAMETER NoPrompt
   Unattended run (openvpn method): when the VPN container has to be started, refresh the token silently only and exit 4
   instead of opening a sign-in window or printing a device code when an interactive sign-in is needed.
 .PARAMETER Stop
-  Remove the forwarding sidecar (and the -Caddy routes and hosts entries) and exit.
+  Stop built-in forwarding (and the -Caddy routes and hosts entries) and exit.
 .EXAMPLE
   .\forward-vpn.ps1 -VpnProfile "igh-insurances-refresh" -Forward "1433=sql-x.database.windows.net:1433","8443=aif-x.openai.azure.com:443"
 .EXAMPLE
@@ -58,7 +57,7 @@ param(
     [switch]$Stop
 )
 $ErrorActionPreference = 'Stop'
-$IMAGE = 'alpine/socat:latest'
+. (Join-Path $PSScriptRoot 'vpn-services.ps1')
 $HOSTS_PATH = "$env:windir\System32\drivers\etc\hosts"
 $HOSTS_MARKER = '# fwd-vpn-caddy'
 $ID_PREFIX = 'fwd-vpn-'
@@ -99,7 +98,7 @@ function Update-HostsEntries ([string[]]$AddHosts = @()) {
     [System.IO.File]::WriteAllText($data, $content, [System.Text.UTF8Encoding]::new($false))
     [System.IO.File]::WriteAllText($tmp, "Copy-Item -LiteralPath '$data' -Destination '$HOSTS_PATH' -Force", [System.Text.UTF8Encoding]::new($false))
     Write-Step '! UAC prompt: editing the hosts file requires admin' Yellow
-    try { Start-Process powershell -Verb RunAs -Wait -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$tmp`"" }
+    try { Start-Process powershell -WindowStyle Hidden -Verb RunAs -Wait -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$tmp`"" }
     finally { Remove-Item $data, $tmp -ErrorAction SilentlyContinue }
 }
 
@@ -109,8 +108,11 @@ function Get-ContainerNameFromProfile ([string]$Name) {
 
 $maps = foreach ($f in $Forward) {
     if ($f -notmatch '^(\d{1,5})=([A-Za-z0-9.-]+):(\d{1,5})$') { throw "Bad -Forward '$f', expected <local port>=<host>:<port>" }
+    if ([int]$Matches[1] -lt 1 -or [int]$Matches[1] -gt 65535 -or [int]$Matches[3] -lt 1 -or [int]$Matches[3] -gt 65535) { throw "Port out of range in -Forward '$f'." }
     [pscustomobject]@{ Local = [int]$Matches[1]; Host = $Matches[2]; Port = [int]$Matches[3] }
 }
+
+if ($maps -and @($maps.Local | Select-Object -Unique).Count -ne @($maps).Count) { throw 'Duplicate local ports in -Forward.' }
 
 # -CaddyOff alone (no -Forward) only needs Caddy and the hosts file, so it also works while Docker or the VPN container is down.
 # With -Forward it is the keeper's "site off" state: forward as usual, just without the Caddy routes.
@@ -131,12 +133,14 @@ else {
 $SIDECAR = "fwd-$CNTR"
 
 if ($Stop) {
+    Stop-VpnService $CNTR forward
     Invoke-Wsl docker rm -f $SIDECAR 2>&1 | Out-Null
-    Write-Step "+ Removed $SIDECAR" DarkGreen
+    Write-Step "+ Stopped forwarding in $CNTR" DarkGreen
     Remove-CaddyObjects
     Update-HostsEntries
     exit 0
 }
+if ($Method -eq 'shim') { throw 'Built-in forwarding services require -Method openvpn.' }
 if (-not $maps) { throw 'Pass at least one -Forward mapping.' }
 
 if ($running -notcontains $CNTR) {
@@ -153,23 +157,14 @@ if ($running -notcontains $CNTR) {
 $published = @(Invoke-Wsl docker port $CNTR | ForEach-Object { if ($_ -match '^(\d+)/tcp') { [int]$Matches[1] } })
 $missing = @($maps.Local | Where-Object { $published -notcontains $_ })
 if ($missing) {
-    throw "VPN container '$CNTR' does not publish port(s) $($missing -join ', '). Recreate it: docker rm -f $CNTR, then connect-vpn.ps1 -VpnProfile <name> -Publish $($maps.Local -join ',')."
+    throw "VPN container '$CNTR' does not publish port(s) $($missing -join ', '). Recreate it: docker rm -f $CNTR, then connect-vpn-openvpn.ps1 -VpnProfile <name> -Publish $($maps.Local -join ',')."
 }
 
-Invoke-Wsl docker image inspect $IMAGE 2>$null | Out-Null
-if ($LASTEXITCODE -ne 0) { Write-Step "Pulling $IMAGE (one-time)..." Yellow; Invoke-Wsl docker pull $IMAGE | Out-Null }
-
-# The tunnel DNS lives in the VPN container's /etc/resolv.conf, which --network container: does not share.
-$resolv = "/tmp/fwd-vpn-resolv-$CNTR.conf"
-Invoke-Wsl bash -lc "docker exec $CNTR cat /etc/resolv.conf > '$resolv'"
-if ($LASTEXITCODE -ne 0) { throw 'Could not read /etc/resolv.conf from the VPN container.' }
-
-# One socat per mapping; the shell keeps the container alive.
-$script = (($maps | ForEach-Object { "socat TCP-LISTEN:$($_.Local),fork,reuseaddr,bind=0.0.0.0 TCP:$($_.Host):$($_.Port) &" }) -join ' ') + ' wait'
+# Remove the legacy sidecar before the built-in processes bind the same ports.
+Assert-VpnServices $CNTR
 Invoke-Wsl docker rm -f $SIDECAR 2>&1 | Out-Null
-Invoke-Wsl docker run -d --name $SIDECAR --restart unless-stopped --network "container:$CNTR" `
-    -v "${resolv}:/etc/resolv.conf:ro" --entrypoint sh $IMAGE -c $script | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Could not start the forwarding sidecar.' }
+$conf = ($maps | ForEach-Object { "$($_.Local) $($_.Host) $($_.Port)" }) -join "`n"
+Set-VpnService -VpnContainer $CNTR -Service forward -Configuration $conf
 
 foreach ($m in $maps) { Write-Step "+ 127.0.0.1:$($m.Local) -> $($m.Host):$($m.Port) (via $CNTR)" DarkGreen }
 

@@ -25,8 +25,12 @@ tls-auth /work/tls-auth.key 1
 ca /work/dr.pem
 auth-user-pass /work/creds
 
-# Apply the pushed DNS server(s) to /etc/resolv.conf when the tunnel comes up.
+# Refresh DNS even on soft reconnects with persist-tun, and restore Docker DNS
+# while disconnected so the gateway can still be resolved.
 script-security 2
 up /work/up-dns.sh
+down /work/up-dns.sh
+down-pre
+up-restart
 
 verb 3

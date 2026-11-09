@@ -49,7 +49,12 @@ RUN strings src/openvpn/openvpn | grep -E "IV_PLAT_DEVICE_ID=x64" && echo "PEER-
 FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y \
     libssl3 liblzo2-2 liblz4-1 libpam0g libcap-ng0 iproute2 iputils-ping \
-    ca-certificates \
+    ca-certificates tinyproxy socat util-linux tini \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/openvpn/src/openvpn/openvpn /usr/local/sbin/openvpn
-ENTRYPOINT ["/usr/local/sbin/openvpn"]
+COPY vpn-services.sh /usr/local/sbin/vpn-services
+COPY entrypoint.sh /usr/local/sbin/vpn-entrypoint
+RUN sed -i 's/\r$//' /usr/local/sbin/vpn-services /usr/local/sbin/vpn-entrypoint \
+ && chmod +x /usr/local/sbin/vpn-services /usr/local/sbin/vpn-entrypoint
+LABEL local.azurevpn.services="1"
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/sbin/vpn-entrypoint"]
